@@ -19,7 +19,7 @@ class TennisBBoxDataset(Dataset):
         image: FloatTensor of shape (3, H, W)
         bbox: FloatTensor of shape (4,) in [x_min, y_min, w, h] format
     """
-    def __init__(self, items, root_dir: str, annotation_files: List[str], transform=None):
+    def __init__(self, root_dir: str, annotation_files: List[str], transform=None):
         
         self.root_dir = root_dir
         # image preprocessing
@@ -60,7 +60,7 @@ class TennisBBoxDataset(Dataset):
     # returns how many samples are in the dataset
     # for batching
     def __len__(self):
-        return len(self.items)
+        return len(self.samples)
     
     # image, bbox = dataset[i]
     def __getitem__(self, idx):

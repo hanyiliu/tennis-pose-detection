@@ -19,7 +19,7 @@ class BBoxDetectionModel(nn.Module):
         # (B, C, H, W) -> (B, C, H/2, W/2)
         self.pool = nn.MaxPool2d(2, 2)
         
-        self.fc1 = nn.Linear(64 * 90 * 160, 256)
+        self.fc1 = nn.Linear(64 * 32 * 32, 256)
         # maps 256 features from fc1 to 4 outputs: [x_min, y_min, width, height]
         self.fc2 = nn.Linear(256, 4)
         
