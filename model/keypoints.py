@@ -1,4 +1,4 @@
-# utils/keypoints.py
+# keypoints.py
 
 import torch
 
