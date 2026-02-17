@@ -5,6 +5,21 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from models.bbox_detection import BBoxDetectionModel
 import train.bbox_train
+import kagglehub
+import os
+
+if os.path.basename(os.getcwd()) == "eda":
+    os.chdir("..")
+
+print(f"Current working directory: {os.getcwd()}")
+
+# Set download path to root dir, kagglehub automatically creates datasets subdir
+os.environ["KAGGLEHUB_CACHE"] = ""
+
+# Download latest version
+path = kagglehub.dataset_download("orvile/tennis-player-actions-dataset")
+
+print("Path to dataset files:", path)
 
 # checking which GPU we're using (NVIDIA vs Apple vs other)
 def get_device():
