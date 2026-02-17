@@ -16,7 +16,7 @@ class KeypointDetectionModel(nn.Module):
         matrix, 3 = # of RGB channels.
     - Input dimensions (height and width) must be divisible by 32 due to the use of 
         5 stride=2 convolutions in the encoder and bottleneck layers.
-    - Minimum input size: 32x32 pixels.
+    - Minimum input size: 32x32 pixels with 3 RGB channels.
 
     Model Output:
     - Heatmap of each keypoint (matrix of 18 channels with each channel having
