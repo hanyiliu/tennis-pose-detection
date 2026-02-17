@@ -2,7 +2,7 @@
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import torch.nn.functional as torch
 
 
 class PoseClassificationModel(nn.Module):
@@ -82,14 +82,14 @@ class PoseClassificationModel(nn.Module):
 
         x = keypoints.reshape(keypoints.size(0), -1)  # (B,54), flatten keypoints into shape (B, num_keypoints*3) to be input into fully connected layers. Each sample in the batch is now represented as a 54-dimensional vector containing the x,y,visibility for each of the 18 keypoints.
 
-        x = F.relu(self.fc1(x))        # (B,hidden_dim), pass through first fully connected layer and apply ReLU activation to introduce non-linearity. The model will learn more complex representations of the keypoint data.
+        x = torch.relu(self.fc1(x))        # (B,hidden_dim), pass through first fully connected layer and apply ReLU activation to introduce non-linearity. The model will learn more complex representations of the keypoint data.
         x = self.drop(x)               # apply dropout for regularization, randomly zeroing out some of the features to prevent overfitting and encourage the model to learn more robust features that generalize better to unseen data.
-        x = F.relu(self.fc2(x))        # (B,hidden_dim), pass through second fully connected layer and apply ReLU activation again for more complex representations.
+        x = torch.relu(self.fc2(x))        # (B,hidden_dim), pass through second fully connected layer and apply ReLU activation again for more complex representations.
         x = self.drop(x)               # apply dropout again for regularization before the final output layer.      
         logits = self.out(x)  # (B,4)
 
         if return_logits: # if the caller wants the raw logits (e.g. for use with a loss function like CrossEntropyLoss that expects logits), return them directly without applying softmax.
             return logits 
 
-        probs = F.softmax(logits, dim=-1) # (B,4), apply softmax to convert logits into probabilities for each class. The output will be a tensor of shape (B, num_classes) where each row sums to 1 and represents the model's confidence in each class for that sample.
+        probs = torch.softmax(logits, dim=-1) # (B,4), apply softmax to convert logits into probabilities for each class. The output will be a tensor of shape (B, num_classes) where each row sums to 1 and represents the model's confidence in each class for that sample.
         return probs
