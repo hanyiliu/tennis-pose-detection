@@ -77,8 +77,8 @@ class KeypointDetectionModel(nn.Module):
             each channel shows model confidence on its keypoint.
             
         Raises:
-            ValueError: If input tensor doesn't have 4 dimensions or if height/width 
-                are not divisible by 32.
+            ValueError: If input tensor doesn't have 4 dimensions, doesn't have 
+                exactly 3 channels, or if height/width are not divisible by 32.
         """
         # Validate input shape
         if x.dim() != 4:
