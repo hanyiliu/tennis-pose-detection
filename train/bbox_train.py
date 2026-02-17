@@ -7,6 +7,21 @@ import torch.nn as nn
 from torchvision import transforms
 from data.bbox_dataset import TennisBBoxDataset
 from models.bbox_detection import BBoxDetectionModel
+import kagglehub
+import os
+
+if os.path.basename(os.getcwd()) == "eda":
+    os.chdir("..")
+
+print(f"Current working directory: {os.getcwd()}")
+
+# Set download path to root dir, kagglehub automatically creates datasets subdir
+os.environ["KAGGLEHUB_CACHE"] = ""
+
+# Download latest version
+path = kagglehub.dataset_download("orvile/tennis-player-actions-dataset")
+
+print("Path to dataset files:", path)
 
 # do we need this idk
 # checking which GPU we're using (NVIDIA vs Apple vs other)
