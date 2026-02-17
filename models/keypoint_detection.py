@@ -94,6 +94,6 @@ class KeypointDetectionModel(nn.Module):
         d4 = torch.cat([d4, e1], dim=1)
         d4 = torch.relu(self.decoder_conv4(d4))
 
-        output = self.extraction_conv1(d4)
+        output = torch.sigmoid(self.extraction_conv1(d4))
 
         return output
