@@ -14,6 +14,9 @@ class KeypointDetectionModel(nn.Module):
     Model Input:
     - Only part of the image containing just the player as a (bbox height x bbox width x 3)
         matrix, 3 = # of RGB channels.
+    - Input dimensions (height and width) must be divisible by 32 due to the use of 
+        5 stride=2 convolutions in the encoder and bottleneck layers.
+    - Minimum input size: 32x32 pixels.
 
     Model Output:
     - Heatmap of each keypoint (matrix of 18 channels with each channel having
@@ -65,12 +68,39 @@ class KeypointDetectionModel(nn.Module):
     def forward(self, x):
         """Forward pipeline for Keypoint Detection model.
         Args:
-            x (torch.Tensor): Input 3-channel image of player.
+            x (torch.Tensor): Input 3-channel image of player. Shape must be 
+                (batch_size, 3, height, width) where height and width are 
+                divisible by 32.
 
         Returns:
             output (torch.Tensor): Heatmap of `num_keypoints`-channel, where 
             each channel shows model confidence on its keypoint.
+            
+        Raises:
+            ValueError: If input tensor doesn't have 4 dimensions or if height/width 
+                are not divisible by 32.
         """
+        # Validate input shape
+        if x.dim() != 4:
+            raise ValueError(
+                f"Input tensor must have 4 dimensions (batch_size, channels, height, width), "
+                f"got {x.dim()} dimensions with shape {x.shape}"
+            )
+        
+        batch_size, channels, height, width = x.shape
+        
+        if channels != 3:
+            raise ValueError(
+                f"Input tensor must have 3 channels (RGB), got {channels} channels"
+            )
+        
+        if height % 32 != 0 or width % 32 != 0:
+            raise ValueError(
+                f"Input height and width must be divisible by 32 due to stride=2 convolutions. "
+                f"Got height={height}, width={width}. "
+                f"Please resize your input to dimensions divisible by 32 (e.g., 32, 64, 96, 128, ...)."
+            )
+        
         e1 = torch.relu(self.encoder_conv1(x))
         e2 = torch.relu(self.encoder_conv2(e1))
         e3 = torch.relu(self.encoder_conv3(e2))
