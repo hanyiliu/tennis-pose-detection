@@ -5,7 +5,7 @@ import os
 import argparse
 import torch.nn as nn
 from torchvision import transforms
-from datasets.bbox_dataset import TennisBBoxDataset
+from data.bbox_dataset import TennisBBoxDataset
 from models.bbox_detection import BBoxDetectionModel
 
 # do we need this idk
@@ -13,6 +13,10 @@ from models.bbox_detection import BBoxDetectionModel
 def get_device():
     if torch.cuda.is_available():
         return torch.device("cuda")
+    # if Apple Silicon GPU via Metal
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
     
 @torch.no_grad() # disables gradient tracking for evaluation
 # LOL found this out to make eval more efficient
