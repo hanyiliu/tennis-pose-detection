@@ -11,6 +11,10 @@ import torch.nn as nn
 from torchvision import transforms
 from models.bbox_detection import BBoxDetectionModel
 
+<<<<<<< Updated upstream
+=======
+
+>>>>>>> Stashed changes
 # PyTorch requires __init__, __len__, and __getitem__ for dataset classes
 class TennisBBoxDataset(Dataset):
     """
@@ -30,6 +34,10 @@ class TennisBBoxDataset(Dataset):
         
         for ann_path in annotation_files:
             full_ann_path = os.path.join(root_dir, ann_path)
+<<<<<<< Updated upstream
+=======
+            print(full_ann_path)
+>>>>>>> Stashed changes
             with open(full_ann_path, "r") as f:
                 data = json.load(f)
                 
