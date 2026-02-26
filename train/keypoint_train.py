@@ -247,7 +247,7 @@ def train_keypoint_model(args):
     deploy_weights_path = os.path.join(args.export_dir, "keypoint_best_state_dict.pt")
     deploy_torchscript_path = os.path.join(args.export_dir, "keypoint_best_torchscript.pt")
     best_val_loss = float("inf")
-    best_cv_acc = 0.0
+    best_cv_acc = float("-inf")
     start_epoch = 1
 
     if args.resume_from is not None:
@@ -311,7 +311,7 @@ def train_keypoint_model(args):
             f"cv loss: {val_loss:.5f} acc: {cv_acc:.5f}"
         )
 
-        if val_loss < best_val_loss:
+        if cv_acc > best_cv_acc:
             best_val_loss = val_loss
             best_cv_acc = cv_acc
             torch.save(
