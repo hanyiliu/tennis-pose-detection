@@ -54,16 +54,16 @@ def cxcywh_to_xyxy(boxes):
 #    a standard way to measure how well two bboxes overlap
 #    (area of overlap) / (area of (prediction OR ground truth))
 # A GOOD RESULT (model is performing very well):
-#   acc@.50: 80-95%
-#   acc@.75: 40-60%
+#   accuracy@.50: 80-95%
+#   accuracy@.75: 40-60%
 
 # A DECENT RESULT (reasonable learning):
-#   acc@.50: 50-75%
-#   acc@.75: 20-50%
+#   accuracy@.50: 50-75%
+#   accuracy@.75: 20-50%
 
 # A BAD RESULT (no learning, predictions are random):
-#   acc@.50: 0-10%
-#   acc@.75: 0%
+#   accuracy@.50: 0-10%
+#   accuracy@.75: 0%
 
 # eps = epsilon
 @torch.no_grad()
@@ -165,7 +165,7 @@ def main():
     # where the dataset folder is
     parser.add_argument("--root_dir", type=str, default=path, help="dataset root directory")
     # number of epochs over training set
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--epochs", type=int, default=50)
     # how many images per step
     parser.add_argument("--batch_size", type=int, default=16)
     # learning rate
@@ -276,11 +276,11 @@ def main():
     
     # load best checkpoint before testing
     model.load_state_dict(torch.load("checkpoints/bbox_best.pt", map_location=device))
-    test_loss, mean_iou, acc = iou_evaluate(model, test_loader, criterion, device)
+    test_loss, mean_iou, accuracy = iou_evaluate(model, test_loader, criterion, device)
     
     print("\n Best test loss:", best_val)
-    print(f"acc@0.50: {acc[0.5]*100} %")
-    print(f"acc@0.75: {acc[0.75]*100} %")
+    print(f"accuracy@0.50: {accuracy[0.5]*100} %")
+    print(f"accuracy@0.75: {accuracy[0.75]*100} %")
     
 if __name__ == "__main__":
     main()

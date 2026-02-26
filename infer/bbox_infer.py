@@ -18,6 +18,10 @@ os.environ["KAGGLEHUB_CACHE"] = ""
 
 # Download latest version
 path = kagglehub.dataset_download("orvile/tennis-player-actions-dataset")
+path = os.path.join(
+    path,
+    "Tennis Player Actions Dataset for Human Pose Estimation"
+)
 
 print("Path to dataset files:", path)
 
@@ -39,7 +43,7 @@ def infer_bbox(img_path: str, checkpoint_path: str="checkpoints/bbox_best.pt", r
     
     # load model + weights
     model = BBoxDetectionModel()
-    model.load_state_dict(torch.load("checkpoints/bbox_best.pt", map_location=device))
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
     model.to(device)
     model.eval()
 
@@ -74,6 +78,7 @@ def infer_bbox(img_path: str, checkpoint_path: str="checkpoints/bbox_best.pt", r
     return [x, y, w, h]
 
 if __name__ == "__main__":
-    img_path = "images/backhand/B_001.jpeg"
+    images_dir = os.path.join(path, "images")
+    img_path = os.path.join(images_dir, "backhand", "B_001.jpeg")
     bbox = infer_bbox(img_path)
     
