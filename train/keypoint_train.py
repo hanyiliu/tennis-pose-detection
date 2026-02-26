@@ -6,6 +6,7 @@ import sys
 import numpy as np
 import torch
 import torch.nn as nn
+import torch_xla.core.xla_model as xm
 from torch.utils.data import DataLoader, random_split
 from torchvision import transforms
 
@@ -21,12 +22,20 @@ from preprocessing.tensor_preprocessing import KeypointsToHeatmaps
 def get_device():
     """Return the best available PyTorch device for training.
 
-    Priority order is CUDA, then Apple MPS, then CPU.
+    Priority order is CUDA, then Apple MPS, then Google TPU (XLA), then CPU.
     """
     if torch.cuda.is_available():
         return torch.device("cuda")
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return torch.device("mps")
+
+    try:
+        xla_device = xm.xla_device()
+        if xla_device is not None:
+            return xla_device
+    except Exception:
+        pass
+
     return torch.device("cpu")
 
 def heatmap_keypoint_accuracy(
