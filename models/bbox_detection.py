@@ -29,7 +29,6 @@ class BBoxDetectionModel(nn.Module):
         x = self.pool(F.relu(self.conv2(x)))
         x = self.pool(F.relu(self.conv3(x)))
         
-        print(x.shape)
         # flattening
         # ex: (B, 64, 90, 160) -> (B, 921600)
         x = x.view(x.size(0), -1)
@@ -38,6 +37,15 @@ class BBoxDetectionModel(nn.Module):
         # shape: (B, 4)
         x = self.fc2(x)
         
+        # constrain outputs to valid ranges
+        min_x = torch.sigmoid(x[:, 0])
+        min_y = torch.sigmoid(x[:, 1])
+        
+        # ensures w/h is positive and less than 1 if normalized
+        w = torch.sigmoid(x[:, 2])
+        h = torch.sigmoid(x[:, 3])
+        
+        x = torch.stack([min_x, min_y, w, h], dim=1)
         return x
     
 # loss function: criterion = nn.SmoothL1Loss()
