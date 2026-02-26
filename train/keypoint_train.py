@@ -5,6 +5,7 @@ import sys
 
 import numpy as np
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 from torchvision import transforms
 
@@ -81,42 +82,54 @@ def heatmap_keypoint_accuracy(
     return correct_visible / visible_count
 
 
-def weighted_mse_loss(
-    pred_heatmaps: torch.Tensor,
-    target_heatmaps: torch.Tensor,
-    foreground_weight: float,
-) -> torch.Tensor:
-    """Compute weighted MSE for Gaussian heatmap regression.
-
-    Foreground pixels are emphasized by scaling each pixel's squared error with
-    a weight derived from target intensity:
-        weight = 1 + (foreground_weight - 1) * target
+@torch.no_grad()
+def compute_channelwise_pos_weight(loader, num_keypoints: int, max_pos_weight: float = 100.0) -> torch.Tensor:
+    """Compute per-channel positive class weights for sparse heatmap targets.
 
     Args:
-        pred_heatmaps: Predicted heatmaps of shape (B, K, H, W) in [0, 1].
-        target_heatmaps: Ground-truth Gaussian heatmaps of shape (B, K, H, W).
-        foreground_weight: Weight multiplier near keypoint peaks (>= 1).
+        loader: Train dataloader returning (images, target_heatmaps).
+        num_keypoints: Number of heatmap channels.
+        max_pos_weight: Upper clamp for numerical stability.
 
     Returns:
-        Scalar weighted MSE loss.
+        Tensor of shape (num_keypoints,) with pos_weight = neg/pos.
     """
-    if foreground_weight < 1.0:
-        raise ValueError(f"foreground_weight must be >= 1.0. Got {foreground_weight}.")
+    pos_count = torch.zeros(num_keypoints, dtype=torch.float64)
+    total_count = torch.zeros(num_keypoints, dtype=torch.float64)
 
-    per_pixel_weight = 1.0 + (foreground_weight - 1.0) * target_heatmaps
-    squared_error = (pred_heatmaps - target_heatmaps) ** 2
-    return (per_pixel_weight * squared_error).mean()
+    for _, target_heatmaps in loader:
+        target = target_heatmaps.float()
+        batch_size, channels, height, width = target.shape
+        if channels != num_keypoints:
+            raise ValueError(
+                f"Expected {num_keypoints} keypoint channels, got {channels} while computing pos_weight."
+            )
+
+        per_channel_pos = target.sum(dim=(0, 2, 3)).to(torch.float64)
+        per_channel_total = torch.full(
+            (channels,),
+            fill_value=batch_size * height * width,
+            dtype=torch.float64,
+        )
+
+        pos_count += per_channel_pos
+        total_count += per_channel_total
+
+    neg_count = total_count - pos_count
+    pos_weight = neg_count / torch.clamp(pos_count, min=1.0)
+    pos_weight = torch.clamp(pos_weight, min=1.0, max=max_pos_weight)
+    return pos_weight.to(torch.float32)
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, foreground_weight: float):
+def evaluate(model, loader, criterion, device):
     """Compute average loss and accuracy over one evaluation dataloader.
 
     Args:
         model: Keypoint model that outputs heatmaps.
         loader: Validation or test dataloader.
+        criterion: Loss function used to compare predicted vs target heatmaps.
         device: torch.device where tensors and model are placed.
-        foreground_weight: Foreground emphasis factor for weighted MSE.
 
     Returns:
         Tuple of (mean loss, keypoint accuracy) over the loader.
@@ -130,8 +143,8 @@ def evaluate(model, loader, device, foreground_weight: float):
         images = images.to(device)
         target_heatmaps = target_heatmaps.to(device)
 
-        pred_heatmaps = torch.sigmoid(model(images))
-        loss = weighted_mse_loss(pred_heatmaps, target_heatmaps, foreground_weight)
+        pred_heatmaps = model(images)
+        loss = criterion(pred_heatmaps, target_heatmaps)
         batch_acc = heatmap_keypoint_accuracy(pred_heatmaps, target_heatmaps)
 
         bs = images.size(0)
@@ -208,12 +221,20 @@ def train_keypoint_model(args):
     print("Image size:", image_size, "Target heatmap size:", target_heatmap_size)
 
     model = KeypointDetectionModel(num_keypoints=args.num_keypoints).to(device)
+    pos_weight = compute_channelwise_pos_weight(
+        train_loader,
+        num_keypoints=args.num_keypoints,
+        max_pos_weight=args.max_pos_weight,
+    ).to(device)
+    print("BCE pos_weight per channel:", pos_weight.detach().cpu().numpy())
+    pos_weight_broadcast = pos_weight.view(args.num_keypoints, 1, 1)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_broadcast)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     images0, heatmaps0 = next(iter(train_loader))
     images0 = images0.to(device)
     heatmaps0 = heatmaps0.to(device)
-    pred0 = torch.sigmoid(model(images0))
+    pred0 = model(images0)
     if pred0.shape != heatmaps0.shape:
         raise RuntimeError(
             f"Model output shape {tuple(pred0.shape)} does not match target shape {tuple(heatmaps0.shape)}. "
@@ -269,8 +290,8 @@ def train_keypoint_model(args):
             target_heatmaps = target_heatmaps.to(device)
 
             optimizer.zero_grad(set_to_none=True)
-            pred_heatmaps = torch.sigmoid(model(images))
-            loss = weighted_mse_loss(pred_heatmaps, target_heatmaps, args.foreground_weight)
+            pred_heatmaps = model(images)
+            loss = criterion(pred_heatmaps, target_heatmaps)
             batch_acc = heatmap_keypoint_accuracy(pred_heatmaps, target_heatmaps)
             loss.backward()
             optimizer.step()
@@ -282,7 +303,7 @@ def train_keypoint_model(args):
 
         train_loss = total_loss / max(total_count, 1)
         train_acc = train_acc_sum / max(total_count, 1)
-        val_loss, cv_acc = evaluate(model, val_loader, device, args.foreground_weight)
+        val_loss, cv_acc = evaluate(model, val_loader, criterion, device)
 
         print(
             f"Epoch {epoch:03d}/{args.epochs} | "
@@ -311,7 +332,7 @@ def train_keypoint_model(args):
 
     checkpoint = torch.load(best_path, map_location=device)
     model.load_state_dict(checkpoint["model_state"])
-    test_loss, test_acc = evaluate(model, test_loader, device, args.foreground_weight)
+    test_loss, test_acc = evaluate(model, test_loader, criterion, device)
     print(f"Test loss: {test_loss:.5f} | Test accuracy: {test_acc:.5f}")
 
     deploy_payload = {
@@ -351,7 +372,7 @@ def main():
         --image_height: Letterboxed training image/heatmap height in pixels.
         --image_width: Letterboxed training image/heatmap width in pixels.
         --heatmap_sigma: Gaussian spread (pixels) for target keypoint heatmaps.
-        --foreground_weight: Relative weight applied near Gaussian peaks in weighted MSE.
+        --max_pos_weight: Upper clamp for BCE positive-class weighting.
         --resume_from: Optional checkpoint/model path to continue training from.
         --export_dir: Directory to store final deployable model artifacts.
     """
@@ -373,7 +394,7 @@ def main():
     parser.add_argument("--image_height", type=int, default=128)
     parser.add_argument("--image_width", type=int, default=128)
     parser.add_argument("--heatmap_sigma", type=float, default=2.0)
-    parser.add_argument("--foreground_weight", type=float, default=20.0)
+    parser.add_argument("--max_pos_weight", type=float, default=100.0)
     parser.add_argument("--resume_from", type=str, default=None)
     parser.add_argument("--export_dir", type=str, default="exports")
 
