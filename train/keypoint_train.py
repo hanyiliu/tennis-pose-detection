@@ -114,9 +114,61 @@ class KeypointsToHeatmaps:
         return heatmaps
 
 
+def heatmap_keypoint_accuracy(
+    pred_heatmaps: torch.Tensor,
+    target_heatmaps: torch.Tensor,
+    normalized_distance_threshold: float = 0.05,
+) -> float:
+    """Compute keypoint localization accuracy from predicted and target heatmaps.
+
+    A keypoint is counted correct if its predicted argmax location is within
+    `normalized_distance_threshold` (in normalized image space) of the target
+    argmax location. Only visible keypoints (target heatmap max > 0) are scored.
+
+    Args:
+        pred_heatmaps: Predicted heatmaps of shape (B, K, H, W).
+        target_heatmaps: Ground-truth heatmaps of shape (B, K, H, W).
+        normalized_distance_threshold: Max normalized Euclidean distance for a
+            keypoint prediction to be considered correct.
+
+    Returns:
+        Accuracy in [0, 1] over visible keypoints.
+    """
+    if pred_heatmaps.shape != target_heatmaps.shape:
+        raise ValueError(
+            f"pred_heatmaps and target_heatmaps must have same shape. "
+            f"Got {tuple(pred_heatmaps.shape)} vs {tuple(target_heatmaps.shape)}"
+        )
+
+    bsz, num_keypoints, heat_h, heat_w = pred_heatmaps.shape
+    pred_flat = pred_heatmaps.view(bsz, num_keypoints, -1)
+    target_flat = target_heatmaps.view(bsz, num_keypoints, -1)
+
+    pred_idx = pred_flat.argmax(dim=-1)
+    target_idx = target_flat.argmax(dim=-1)
+    visible = target_flat.max(dim=-1).values > 0.0
+
+    pred_x = (pred_idx % heat_w).float()
+    pred_y = (pred_idx // heat_w).float()
+    target_x = (target_idx % heat_w).float()
+    target_y = (target_idx // heat_w).float()
+
+    dx = (pred_x - target_x) / max(heat_w - 1, 1)
+    dy = (pred_y - target_y) / max(heat_h - 1, 1)
+    dist = torch.sqrt(dx * dx + dy * dy)
+    correct = dist <= normalized_distance_threshold
+
+    visible_count = visible.sum().item()
+    if visible_count == 0:
+        return 0.0
+
+    correct_visible = (correct & visible).sum().item()
+    return correct_visible / visible_count
+
+
 @torch.no_grad()
 def evaluate(model, loader, criterion, device):
-    """Compute average loss over one evaluation dataloader.
+    """Compute average loss and accuracy over one evaluation dataloader.
 
     Args:
         model: Keypoint model that outputs heatmaps.
@@ -125,11 +177,12 @@ def evaluate(model, loader, criterion, device):
         device: torch.device where tensors and model are placed.
 
     Returns:
-        Mean loss across all samples in the loader.
+        Tuple of (mean loss, keypoint accuracy) over the loader.
     """
     model.eval()
     total_loss = 0.0
     total_count = 0
+    weighted_acc_sum = 0.0
 
     for images, target_heatmaps in loader:
         images = images.to(device)
@@ -137,12 +190,16 @@ def evaluate(model, loader, criterion, device):
 
         pred_heatmaps = model(images)
         loss = criterion(pred_heatmaps, target_heatmaps)
+        batch_acc = heatmap_keypoint_accuracy(pred_heatmaps, target_heatmaps)
 
         bs = images.size(0)
         total_loss += loss.item() * bs
         total_count += bs
+        weighted_acc_sum += batch_acc * bs
 
-    return total_loss / max(total_count, 1)
+    mean_loss = total_loss / max(total_count, 1)
+    mean_acc = weighted_acc_sum / max(total_count, 1)
+    return mean_loss, mean_acc
 
 
 def train_keypoint_model(args):
@@ -225,11 +282,13 @@ def train_keypoint_model(args):
     os.makedirs("checkpoints", exist_ok=True)
     best_path = "checkpoints/keypoint_best.pt"
     best_val_loss = float("inf")
+    best_cv_acc = 0.0
 
     for epoch in range(1, args.epochs + 1):
         model.train()
         total_loss = 0.0
         total_count = 0
+        train_acc_sum = 0.0
 
         for images, target_heatmaps in train_loader:
             images = images.to(device)
@@ -238,20 +297,28 @@ def train_keypoint_model(args):
             optimizer.zero_grad(set_to_none=True)
             pred_heatmaps = model(images)
             loss = criterion(pred_heatmaps, target_heatmaps)
+            batch_acc = heatmap_keypoint_accuracy(pred_heatmaps, target_heatmaps)
             loss.backward()
             optimizer.step()
 
             bs = images.size(0)
             total_loss += loss.item() * bs
             total_count += bs
+            train_acc_sum += batch_acc * bs
 
         train_loss = total_loss / max(total_count, 1)
-        val_loss = evaluate(model, val_loader, criterion, device)
+        train_acc = train_acc_sum / max(total_count, 1)
+        val_loss, cv_acc = evaluate(model, val_loader, criterion, device)
 
-        print(f"Epoch {epoch:03d}/{args.epochs} | train loss: {train_loss:.5f} | val loss: {val_loss:.5f}")
+        print(
+            f"Epoch {epoch:03d}/{args.epochs} | "
+            f"train loss: {train_loss:.5f} acc: {train_acc:.5f} | "
+            f"cv loss: {val_loss:.5f} acc: {cv_acc:.5f}"
+        )
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            best_cv_acc = cv_acc
             torch.save(
                 {
                     "model_state": model.state_dict(),
@@ -261,12 +328,13 @@ def train_keypoint_model(args):
             )
 
     print("Best val loss:", best_val_loss)
+    print("Best cv accuracy:", best_cv_acc)
     print("Saved checkpoint:", best_path)
 
     checkpoint = torch.load(best_path, map_location=device)
     model.load_state_dict(checkpoint["model_state"])
-    test_loss = evaluate(model, test_loader, criterion, device)
-    print(f"Test loss: {test_loss:.5f}")
+    test_loss, test_acc = evaluate(model, test_loader, criterion, device)
+    print(f"Test loss: {test_loss:.5f} | Test accuracy: {test_acc:.5f}")
 
 
 def main():

@@ -119,9 +119,6 @@ class TennisKeypointDataset(Dataset):
         keypoints[:, 1] = (keypoints[:, 1] - y) / height # normalize y to bbox-local coords
 
         if self.keypoint_transform is not None:
-            try:
-                keypoints = self.keypoint_transform(keypoints, float(w), float(h))
-            except TypeError:
-                keypoints = self.keypoint_transform(keypoints)
+            keypoints = self.keypoint_transform(keypoints, float(w), float(h))
             
         return cropped_img, torch.tensor(keypoints, dtype=torch.float32)
