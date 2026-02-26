@@ -19,8 +19,8 @@ class KeypointDetectionModel(nn.Module):
     - Minimum input size: 32x32 pixels with 3 RGB channels.
 
     Model Output:
-    - Heatmap of each keypoint (matrix of 18 channels with each channel having
-        input image width and height).
+    - Logit heatmap of each keypoint (matrix of 18 channels with each channel
+        having input image width and height).
 
     Usage:
         # Inference
@@ -130,6 +130,6 @@ class KeypointDetectionModel(nn.Module):
         d5 = self.decoder_convtran5(d4)
         d5 = torch.relu(self.decoder_conv5(d5))
 
-        output = torch.sigmoid(self.extraction_conv1(d5))
+        output = self.extraction_conv1(d5)
 
         return output

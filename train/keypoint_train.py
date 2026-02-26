@@ -82,6 +82,45 @@ def heatmap_keypoint_accuracy(
 
 
 @torch.no_grad()
+def compute_channelwise_pos_weight(loader, num_keypoints: int, max_pos_weight: float = 100.0) -> torch.Tensor:
+    """Compute per-channel positive class weights for sparse heatmap targets.
+
+    Args:
+        loader: Train dataloader returning (images, target_heatmaps).
+        num_keypoints: Number of heatmap channels.
+        max_pos_weight: Upper clamp for numerical stability.
+
+    Returns:
+        Tensor of shape (num_keypoints,) with pos_weight = neg/pos.
+    """
+    pos_count = torch.zeros(num_keypoints, dtype=torch.float64)
+    total_count = torch.zeros(num_keypoints, dtype=torch.float64)
+
+    for _, target_heatmaps in loader:
+        target = target_heatmaps.float()
+        batch_size, channels, height, width = target.shape
+        if channels != num_keypoints:
+            raise ValueError(
+                f"Expected {num_keypoints} keypoint channels, got {channels} while computing pos_weight."
+            )
+
+        per_channel_pos = target.sum(dim=(0, 2, 3)).to(torch.float64)
+        per_channel_total = torch.full(
+            (channels,),
+            fill_value=batch_size * height * width,
+            dtype=torch.float64,
+        )
+
+        pos_count += per_channel_pos
+        total_count += per_channel_total
+
+    neg_count = total_count - pos_count
+    pos_weight = neg_count / torch.clamp(pos_count, min=1.0)
+    pos_weight = torch.clamp(pos_weight, min=1.0, max=max_pos_weight)
+    return pos_weight.to(torch.float32)
+
+
+@torch.no_grad()
 def evaluate(model, loader, criterion, device):
     """Compute average loss and accuracy over one evaluation dataloader.
 
@@ -181,7 +220,14 @@ def train_keypoint_model(args):
     print("Image size:", image_size, "Target heatmap size:", target_heatmap_size)
 
     model = KeypointDetectionModel(num_keypoints=args.num_keypoints).to(device)
-    criterion = nn.MSELoss()
+    pos_weight = compute_channelwise_pos_weight(
+        train_loader,
+        num_keypoints=args.num_keypoints,
+        max_pos_weight=args.max_pos_weight,
+    ).to(device)
+    print("BCE pos_weight per channel:", pos_weight.detach().cpu().numpy())
+    pos_weight_broadcast = pos_weight.view(args.num_keypoints, 1, 1)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_broadcast)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     images0, heatmaps0 = next(iter(train_loader))
@@ -201,8 +247,42 @@ def train_keypoint_model(args):
     deploy_torchscript_path = os.path.join(args.export_dir, "keypoint_best_torchscript.pt")
     best_val_loss = float("inf")
     best_cv_acc = 0.0
+    start_epoch = 1
 
-    for epoch in range(1, args.epochs + 1):
+    if args.resume_from is not None:
+        if not os.path.isfile(args.resume_from):
+            raise FileNotFoundError(f"resume checkpoint not found: {args.resume_from}")
+
+        try:
+            resume_checkpoint = torch.load(args.resume_from, map_location=device)
+        except RuntimeError as error:
+            raise RuntimeError(
+                "Failed to resume training from the provided file. "
+                "Use a training checkpoint/state_dict path such as checkpoints/keypoint_best.pt "
+                "or exports/keypoint_best_state_dict.pt, not exports/keypoint_best_torchscript.pt. "
+                f"Original error: {error}"
+            ) from error
+        if isinstance(resume_checkpoint, dict) and "model_state" in resume_checkpoint:
+            model.load_state_dict(resume_checkpoint["model_state"])
+
+            if "optimizer_state" in resume_checkpoint:
+                optimizer.load_state_dict(resume_checkpoint["optimizer_state"])
+
+            if "epoch" in resume_checkpoint:
+                start_epoch = int(resume_checkpoint["epoch"]) + 1
+
+            if "best_val_loss" in resume_checkpoint:
+                best_val_loss = float(resume_checkpoint["best_val_loss"])
+
+            if "best_cv_acc" in resume_checkpoint:
+                best_cv_acc = float(resume_checkpoint["best_cv_acc"])
+        else:
+            model.load_state_dict(resume_checkpoint)
+
+        print(f"Resumed from: {args.resume_from}")
+        print(f"Resume start epoch: {start_epoch}")
+
+    for epoch in range(start_epoch, args.epochs + 1):
         model.train()
         total_loss = 0.0
         total_count = 0
@@ -240,6 +320,10 @@ def train_keypoint_model(args):
             torch.save(
                 {
                     "model_state": model.state_dict(),
+                    "optimizer_state": optimizer.state_dict(),
+                    "epoch": epoch,
+                    "best_val_loss": best_val_loss,
+                    "best_cv_acc": best_cv_acc,
                     "args": vars(args),
                 },
                 best_path,
@@ -291,6 +375,8 @@ def main():
         --image_height: Letterboxed training image/heatmap height in pixels.
         --image_width: Letterboxed training image/heatmap width in pixels.
         --heatmap_sigma: Gaussian spread (pixels) for target keypoint heatmaps.
+        --max_pos_weight: Upper clamp for BCE positive-class weighting.
+        --resume_from: Optional checkpoint/model path to continue training from.
         --export_dir: Directory to store final deployable model artifacts.
     """
     parser = argparse.ArgumentParser()
@@ -311,6 +397,8 @@ def main():
     parser.add_argument("--image_height", type=int, default=128)
     parser.add_argument("--image_width", type=int, default=128)
     parser.add_argument("--heatmap_sigma", type=float, default=2.0)
+    parser.add_argument("--max_pos_weight", type=float, default=100.0)
+    parser.add_argument("--resume_from", type=str, default=None)
     parser.add_argument("--export_dir", type=str, default="exports")
 
     args = parser.parse_args()
