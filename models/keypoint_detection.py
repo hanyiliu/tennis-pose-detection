@@ -62,8 +62,11 @@ class KeypointDetectionModel(nn.Module):
         self.decoder_convtran4 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
         self.decoder_conv4 = nn.Conv2d(128, 64, kernel_size=3, stride=1, padding=1)
 
+        self.decoder_convtran5 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
+        self.decoder_conv5 = nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1)
+
         # Extraction Stage
-        self.extraction_conv1 = nn.Conv2d(64, num_keypoints, kernel_size=1, stride=1)
+        self.extraction_conv1 = nn.Conv2d(32, num_keypoints, kernel_size=1, stride=1)
 
     def forward(self, x):
         """Forward pipeline for Keypoint Detection model.
@@ -87,7 +90,7 @@ class KeypointDetectionModel(nn.Module):
                 f"got {x.dim()} dimensions with shape {x.shape}"
             )
         
-        batch_size, channels, height, width = x.shape
+        _, channels, height, width = x.shape
         
         if channels != 3:
             raise ValueError(
@@ -124,6 +127,9 @@ class KeypointDetectionModel(nn.Module):
         d4 = torch.cat([d4, e1], dim=1)
         d4 = torch.relu(self.decoder_conv4(d4))
 
-        output = torch.sigmoid(self.extraction_conv1(d4))
+        d5 = self.decoder_convtran5(d4)
+        d5 = torch.relu(self.decoder_conv5(d5))
+
+        output = torch.sigmoid(self.extraction_conv1(d5))
 
         return output

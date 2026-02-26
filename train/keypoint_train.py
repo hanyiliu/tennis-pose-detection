@@ -1,6 +1,7 @@
 import argparse
 import os
 import random
+import sys
 from typing import Tuple
 
 import numpy as np
@@ -9,9 +10,17 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 from torchvision import transforms
 
-from data.keypoint_dataset import TennisKeypointDataset
-from models.keypoint_detection import KeypointDetectionModel
-from preprocessing.pil_preprocessing import letterbox_resize
+try:
+    from data.keypoint_dataset import TennisKeypointDataset
+    from models.keypoint_detection import KeypointDetectionModel
+    from preprocessing.pil_preprocessing import letterbox_resize
+except ModuleNotFoundError:
+    PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    if PROJECT_ROOT not in sys.path:
+        sys.path.insert(0, PROJECT_ROOT)
+    from data.keypoint_dataset import TennisKeypointDataset
+    from models.keypoint_detection import KeypointDetectionModel
+    from preprocessing.pil_preprocessing import letterbox_resize
 
 
 def get_device():
@@ -154,13 +163,20 @@ def train_keypoint_model(args):
     np.random.seed(args.seed)
     random.seed(args.seed)
 
+    if args.image_height % 32 != 0 or args.image_width % 32 != 0:
+        raise ValueError(
+            "image_height and image_width must be divisible by 32 for KeypointDetectionModel. "
+            f"Got image_height={args.image_height}, image_width={args.image_width}."
+        )
+
     image_size = (args.image_height, args.image_width)
+    target_heatmap_size = image_size
     image_transform = transforms.Compose([
         transforms.Lambda(lambda img: letterbox_resize(img, image_size)),
         transforms.ToTensor(),
     ])
     keypoint_transform = KeypointsToHeatmaps(
-        out_size=image_size,
+        out_size=target_heatmap_size,
         num_keypoints=args.num_keypoints,
         sigma=args.heatmap_sigma,
     )
@@ -190,6 +206,7 @@ def train_keypoint_model(args):
     device = get_device()
     print("Device:", device)
     print("Train/Val/Test sizes:", len(train_ds), len(val_ds), len(test_ds))
+    print("Image size:", image_size, "Target heatmap size:", target_heatmap_size)
 
     model = KeypointDetectionModel(num_keypoints=args.num_keypoints).to(device)
     criterion = nn.MSELoss()
@@ -286,8 +303,8 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--num_keypoints", type=int, default=18)
-    parser.add_argument("--image_height", type=int, default=256)
-    parser.add_argument("--image_width", type=int, default=256)
+    parser.add_argument("--image_height", type=int, default=128)
+    parser.add_argument("--image_width", type=int, default=128)
     parser.add_argument("--heatmap_sigma", type=float, default=2.0)
 
     args = parser.parse_args()
