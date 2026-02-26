@@ -195,7 +195,10 @@ def train_keypoint_model(args):
         )
 
     os.makedirs("checkpoints", exist_ok=True)
+    os.makedirs(args.export_dir, exist_ok=True)
     best_path = "checkpoints/keypoint_best.pt"
+    deploy_weights_path = os.path.join(args.export_dir, "keypoint_best_state_dict.pt")
+    deploy_torchscript_path = os.path.join(args.export_dir, "keypoint_best_torchscript.pt")
     best_val_loss = float("inf")
     best_cv_acc = 0.0
 
@@ -251,6 +254,24 @@ def train_keypoint_model(args):
     test_loss, test_acc = evaluate(model, test_loader, criterion, device)
     print(f"Test loss: {test_loss:.5f} | Test accuracy: {test_acc:.5f}")
 
+    deploy_payload = {
+        "model_state": model.state_dict(),
+        "num_keypoints": args.num_keypoints,
+        "image_height": args.image_height,
+        "image_width": args.image_width,
+    }
+    torch.save(deploy_payload, deploy_weights_path)
+
+    model_cpu = KeypointDetectionModel(num_keypoints=args.num_keypoints)
+    model_cpu.load_state_dict(model.state_dict())
+    model_cpu.eval()
+    example_input = torch.randn(1, 3, args.image_height, args.image_width)
+    scripted_model = torch.jit.trace(model_cpu, example_input)
+    torch.jit.save(scripted_model, deploy_torchscript_path)
+
+    print("Saved deployable weights:", deploy_weights_path)
+    print("Saved deployable TorchScript:", deploy_torchscript_path)
+
 
 def main():
     """Parse CLI arguments and launch keypoint model training.
@@ -270,6 +291,7 @@ def main():
         --image_height: Letterboxed training image/heatmap height in pixels.
         --image_width: Letterboxed training image/heatmap width in pixels.
         --heatmap_sigma: Gaussian spread (pixels) for target keypoint heatmaps.
+        --export_dir: Directory to store final deployable model artifacts.
     """
     parser = argparse.ArgumentParser()
     parser.add_argument("--root_dir", type=str, required=True)
@@ -289,6 +311,7 @@ def main():
     parser.add_argument("--image_height", type=int, default=128)
     parser.add_argument("--image_width", type=int, default=128)
     parser.add_argument("--heatmap_sigma", type=float, default=2.0)
+    parser.add_argument("--export_dir", type=str, default="exports")
 
     args = parser.parse_args()
     train_keypoint_model(args)
