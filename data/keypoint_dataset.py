@@ -11,7 +11,12 @@ class TennisKeypointDataset(Dataset):
     """A Pytorch Dataset mapping cropped images to keypoints
 
     """    
-    def __init__(self, root_dir: str, annotation_dir: str = "annotations", transform=transforms.ToTensor()):
+    def __init__(
+        self,
+        root_dir: str,
+        annotation_dir: str = "annotations",
+        transform=transforms.ToTensor(),
+    ):
         """Set up dataset to hold correct data for extraction
 
         Args:
@@ -32,14 +37,21 @@ class TennisKeypointDataset(Dataset):
             with open(path, "r") as f:
                 annotation_data = json.load(f)
             
-            id_to_img = {img["id"]: img for img in annotation_data["images"]}
+            id_to_img = {img["id"]: img for img in annotation_data.get("images", [])}
             
-            for ann in annotation_data["annotations"]:
+            for ann in annotation_data.get("annotations", []):
                 image_id = ann["image_id"]
-                img_info = id_to_img[image_id]
+                img_info = id_to_img.get(image_id)
+                if img_info is None:
+                    continue
                 
                 # COCO bbox format: [x_min, y_min, width, height]
-                bbox = ann["bbox"]
+                bbox = ann.get("bbox", None)
+                if not isinstance(bbox, list) or len(bbox) != 4:
+                    continue
+                _, _, w, h = bbox
+                if w <= 0 or h <= 0:
+                    continue
                 
                 # JSON path: "../images/backhand/B_001.jpeg"
                 # we want to get the relative path to root_dir
@@ -55,7 +67,7 @@ class TennisKeypointDataset(Dataset):
                 self.data.append(
                     {
                         "img_path": img_path,
-                        "bbox": bbox, 
+                        "bbox": bbox,
                         "keypoints": keypoints,   
                     }
                 )
@@ -96,10 +108,10 @@ class TennisKeypointDataset(Dataset):
             cropped_img = self.transform(cropped_img)
 
         # Process normalized keypoints
-        keypoints = np.array(keypoints_list, dtype=np.float32).reshape(18,3) # turns flat list of 54 into (18, 3), where 18 is number of keypoints and 3 is (x,y,visibility) for each keypoint.
+        keypoints = np.array(keypoints_list, dtype=np.float32).reshape(18, 3) # turns flat list of 54 into (18, 3), where 18 is number of keypoints and 3 is (x,y,visibility) for each keypoint.
         width = max(float(w), 1.0)
         height = max(float(h), 1.0)
-        keypoints[:, 0] /= width # normalize x
-        keypoints[:, 1] /= height # normalize y
+        keypoints[:, 0] = (keypoints[:, 0] - x) / width  # normalize x to bbox-local coords
+        keypoints[:, 1] = (keypoints[:, 1] - y) / height # normalize y to bbox-local coords
 
         return cropped_img, torch.tensor(keypoints, dtype=torch.float32)
