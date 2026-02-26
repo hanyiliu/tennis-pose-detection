@@ -2,7 +2,6 @@ import argparse
 import os
 import random
 import sys
-from typing import Tuple
 
 import numpy as np
 import torch
@@ -10,17 +9,13 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 from torchvision import transforms
 
-try:
-    from data.keypoint_dataset import TennisKeypointDataset
-    from models.keypoint_detection import KeypointDetectionModel
-    from preprocessing.pil_preprocessing import letterbox_resize
-except ModuleNotFoundError:
-    PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    if PROJECT_ROOT not in sys.path:
-        sys.path.insert(0, PROJECT_ROOT)
-    from data.keypoint_dataset import TennisKeypointDataset
-    from models.keypoint_detection import KeypointDetectionModel
-    from preprocessing.pil_preprocessing import letterbox_resize
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+from data.keypoint_dataset import TennisKeypointDataset
+from models.keypoint_detection import KeypointDetectionModel
+from preprocessing.pil_preprocessing import letterbox_resize
+from preprocessing.tensor_preprocessing import KeypointsToHeatmaps
 
 
 def get_device():
@@ -33,86 +28,6 @@ def get_device():
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
-
-
-class KeypointsToHeatmaps:
-    """Convert bbox-local keypoints into gaussian heatmap targets.
-
-    This transform maps normalized keypoints from cropped-player coordinates to
-    a letterboxed output canvas, then renders one gaussian peak per visible
-    keypoint channel.
-    """
-
-    def __init__(self, out_size: Tuple[int, int], num_keypoints: int = 18, sigma: float = 2.0):
-        """Initialize heatmap transform settings.
-
-        Args:
-            out_size: Output heatmap size as (height, width).
-            num_keypoints: Number of keypoint channels to generate.
-            sigma: Standard deviation for each gaussian peak in pixels.
-        """
-        self.out_h, self.out_w = out_size
-        self.num_keypoints = num_keypoints
-        self.sigma = sigma
-
-    def _draw_gaussian(self, heatmap: np.ndarray, center_x: float, center_y: float):
-        """Draw a gaussian peak at the specified center on a single heatmap.
-
-        Args:
-            heatmap: 2D heatmap array to update in-place.
-            center_x: X coordinate of gaussian center in heatmap space.
-            center_y: Y coordinate of gaussian center in heatmap space.
-        """
-        radius = max(int(3 * self.sigma), 1)
-        x0 = max(int(center_x) - radius, 0)
-        x1 = min(int(center_x) + radius + 1, self.out_w)
-        y0 = max(int(center_y) - radius, 0)
-        y1 = min(int(center_y) + radius + 1, self.out_h)
-
-        if x0 >= x1 or y0 >= y1:
-            return
-
-        xs = np.arange(x0, x1, dtype=np.float32)
-        ys = np.arange(y0, y1, dtype=np.float32)[:, None]
-        gaussian = np.exp(-((xs - center_x) ** 2 + (ys - center_y) ** 2) / (2.0 * (self.sigma ** 2)))
-        heatmap[y0:y1, x0:x1] = np.maximum(heatmap[y0:y1, x0:x1], gaussian)
-
-    def __call__(self, keypoints: np.ndarray, bbox_w: float, bbox_h: float) -> np.ndarray:
-        """Build target heatmaps from normalized bbox-local keypoints.
-
-        Args:
-            keypoints: Array of shape (K, 3) with [x_norm, y_norm, visibility].
-            bbox_w: Width of the uncropped bbox region in pixels.
-            bbox_h: Height of the uncropped bbox region in pixels.
-
-        Returns:
-            Heatmaps as a numpy array of shape (num_keypoints, out_h, out_w).
-        """
-        heatmaps = np.zeros((self.num_keypoints, self.out_h, self.out_w), dtype=np.float32)
-        if bbox_w <= 0 or bbox_h <= 0:
-            return heatmaps
-
-        scale = min(self.out_w / bbox_w, self.out_h / bbox_h)
-        resized_w = bbox_w * scale
-        resized_h = bbox_h * scale
-        pad_x = (self.out_w - resized_w) / 2.0
-        pad_y = (self.out_h - resized_h) / 2.0
-
-        count = min(self.num_keypoints, keypoints.shape[0])
-        for i in range(count):
-            x_norm, y_norm, visibility = keypoints[i]
-            if visibility <= 0:
-                continue
-
-            x_crop = float(np.clip(x_norm, 0.0, 1.0)) * bbox_w
-            y_crop = float(np.clip(y_norm, 0.0, 1.0)) * bbox_h
-
-            x_out = x_crop * scale + pad_x
-            y_out = y_crop * scale + pad_y
-            self._draw_gaussian(heatmaps[i], x_out, y_out)
-
-        return heatmaps
-
 
 def heatmap_keypoint_accuracy(
     pred_heatmaps: torch.Tensor,
