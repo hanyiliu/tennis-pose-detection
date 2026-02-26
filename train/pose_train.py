@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 
-from train.pose_dataset import tennis_pose_dataset 
+from data.pose_dataset import tennis_pose_dataset 
 from models.pose_classification import PoseClassificationModel
 
 
