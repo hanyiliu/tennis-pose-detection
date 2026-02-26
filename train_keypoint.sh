@@ -1,4 +1,3 @@
 python train/keypoint_train.py \
     --root_dir "datasets/orvile/tennis-player-actions-dataset/versions/1/Tennis Player Actions Dataset for Human Pose Estimation" \
-    --lr 1e-4 \
-    --resume_from "checkpoints/keypoint_best.pt"
+    --lr 1e-4

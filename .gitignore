@@ -8,3 +8,4 @@ checkpoints/
 *.pt
 datasets/
 .venv
+colab_training.ipynb

@@ -268,9 +268,6 @@ def train_keypoint_model(args):
             if "optimizer_state" in resume_checkpoint:
                 optimizer.load_state_dict(resume_checkpoint["optimizer_state"])
 
-            if "epoch" in resume_checkpoint:
-                start_epoch = int(resume_checkpoint["epoch"]) + 1
-
             if "best_val_loss" in resume_checkpoint:
                 best_val_loss = float(resume_checkpoint["best_val_loss"])
 
@@ -280,7 +277,6 @@ def train_keypoint_model(args):
             model.load_state_dict(resume_checkpoint)
 
         print(f"Resumed from: {args.resume_from}")
-        print(f"Resume start epoch: {start_epoch}")
 
     for epoch in range(start_epoch, args.epochs + 1):
         model.train()
