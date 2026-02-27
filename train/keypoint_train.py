@@ -171,9 +171,10 @@ def train_keypoint_model(args):
     if abs(total - 1.0) > 1e-6:
         raise ValueError(f"train_split + val_split + test_split must sum to 1. Got {total}")
 
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    random.seed(args.seed)
+    if (args.seed > 0):
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
+        random.seed(args.seed)
 
     if args.image_height % 32 != 0 or args.image_width % 32 != 0:
         raise ValueError(
@@ -388,7 +389,7 @@ def main():
     parser.add_argument("--train_split", type=float, default=0.7)
     parser.add_argument("--val_split", type=float, default=0.15)
     parser.add_argument("--test_split", type=float, default=0.15)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=-1)
 
     parser.add_argument("--num_keypoints", type=int, default=18)
     parser.add_argument("--image_height", type=int, default=128)
