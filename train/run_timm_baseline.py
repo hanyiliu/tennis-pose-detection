@@ -7,11 +7,24 @@ from models.Comparison_Models.Kaggle_Model.dataset import TennisImageClassDatase
 from models.Comparison_Models.Kaggle_Model.train_timm import TrainValidation, TrainConfig
 
 
-def main():
-    dataset_id = "orvile/tennis-player-actions-dataset"  # kagglehub id
+def pick_device():
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
-    mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
-    im_size, bs = 224, 16
+
+def main():
+    dataset_id = "orvile/tennis-player-actions-dataset"
+
+    # ImageNet normalization (works fine for timm pretrained models)
+    mean = [0.485, 0.456, 0.406]
+    std = [0.229, 0.224, 0.225]
+
+    im_size = 160
+    bs = 32
+    ns = 4
 
     tfs = T.Compose([
         T.Resize((im_size, im_size)),
@@ -23,18 +36,22 @@ def main():
         transformations=tfs,
         dataset_id=dataset_id,
         bs=bs,
-        ns=4,
+        ns=ns,
     )
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = pick_device()
+    print("Using device:", device)
+    print("Class map:", classes)
 
     cfg = TrainConfig(
-        model_name="rexnet_150",
+        model_name="resnet18",
+        epochs=8,
+        patience=2,
+        lr=3e-4,
         save_dir="saved_models",
-        save_prefix="tennis_timm_rexnet150",
-        epochs=30,
-        patience=3,
-        threshold=0.0,
+        save_prefix=f"tennis_timm_resnet18_{im_size}",
+        freeze_backbone=False,
+        dev_mode=False,
     )
 
     trainer = TrainValidation(classes=classes, tr_dl=tr_dl, val_dl=val_dl, device=device, cfg=cfg)

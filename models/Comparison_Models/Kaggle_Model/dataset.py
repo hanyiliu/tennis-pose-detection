@@ -1,187 +1,210 @@
 # models/Comparison_Models/Kaggle_Model/dataset.py
 
 import os
-from glob import glob
-from typing import Dict, List, Optional, Tuple
+from glob import glob # finds files by wildcard patterns
+from typing import Dict, List, Optional
 
-from PIL import Image
+from PIL import Image # opens images from disk
 import torch
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
-
 import kagglehub
 
 
-def _resolve_kaggle_root(dataset_id: str) -> str:
-    """
-    Download (or reuse cached) Kaggle dataset and return the usable root directory.
-    KaggleHub often returns a directory that contains exactly one nested folder;
-    we unwrap that like you did in pose_dataset.py.
-    """
-    root_dir = kagglehub.dataset_download(dataset_id)
+# download dataset (kagglehub caches it after first time)
+def resolve_kaggle_root(dataset_id: str) -> str:
+    root = kagglehub.dataset_download(dataset_id)
 
-    subdirs = os.listdir(root_dir)
-    if len(subdirs) == 1:
-        possible_root = os.path.join(root_dir, subdirs[0])
-        if os.path.isdir(possible_root):
-            root_dir = possible_root
+    # sometimes kagglehub wraps everything inside one extra folder
+    # so we just check if that's the case and unwrap it
+    items = os.listdir(root)
 
-    return root_dir
+    if len(items) == 1:
+        maybe_folder = os.path.join(root, items[0])
+        if os.path.isdir(maybe_folder):
+            root = maybe_folder
+
+    return root
 
 
-def _find_images_root(root_dir: str) -> str:
-    """
-    Find the folder that contains class subfolders of images.
-    We look for a directory named 'images' first; otherwise search recursively.
-    """
-    # common case
-    direct = os.path.join(root_dir, "images")
-    if os.path.isdir(direct):
-        return direct
+# get the images folder from the dataset
+def find_images_folder(root: str) -> str:
+    images_path = os.path.join(root, "images")
 
-    # search for any folder named images
-    for dirpath, dirnames, _ in os.walk(root_dir):
-        if "images" in dirnames:
-            return os.path.join(dirpath, "images")
+    # for this dataset we expect an "images" folder
+    # if it's not there, something is wrong
+    if not os.path.isdir(images_path):
+        raise FileNotFoundError(f"Could not find 'images' folder in {root}")
 
-    raise FileNotFoundError(f"Could not find an 'images' folder under: {root_dir}")
+    return images_path
 
 
 class TennisImageClassDataset(Dataset):
-    """
-    Image classification dataset where class label = folder name under images_root:
-        images_root/
-            backhand/
-            forehand/
-            serve/
-            ready/
-    Returns (image_tensor, label_int)
-    """
-
+    # folder structure should look like:
+    # images/
+    #   forehand/
+    #   backhand/
+    #   serve/
+    #   ready_position/
     def __init__(
         self,
         dataset_id: str = "orvile/tennis-player-actions-dataset",
         root_dir: Optional[str] = None,
         images_root: Optional[str] = None,
         transformations=None,
-        im_paths: Optional[List[str]] = None,
-        im_lbls: Optional[List[int]] = None,
-        im_files=(".png", ".jpg", ".jpeg", ".bmp", ".JPG"),
+        image_paths: Optional[List[str]] = None,
+        image_labels: Optional[List[int]] = None,
+        extensions=(".png", ".jpg", ".jpeg", ".bmp", ".JPG"),
         seed: int = 2025,
+
     ):
+        """
+            dataset_id: dataset to download from kaggle
+            root_dir: folde rpath where the dataset lives (None automatically downloaded from kaggle, but if given go to local dataset path instead)
+            images_root: specific folder containing class folders (backhand, forehand, ready position, serve)
+            transformations: resize images, covert to tensor, normalize values. 
+            image_paths: speicifc image file paths, used after splitting.
+            image_labels: list of numeric labels corresponding to image_paths, keeps label mapping consistent between splits.
+            extensions: allows images with the following file extensions
+            seed: random seed
+        """
+    
+        # initalize randomneess
         torch.manual_seed(seed)
-
-        # Resolve root via KaggleHub (cached) unless caller provided local root_dir
-        if not root_dir:
-            root_dir = _resolve_kaggle_root(dataset_id)
-
-        # Find images root unless provided
-        if not images_root:
-            images_root = _find_images_root(root_dir)
-
-        self.root_dir = root_dir
-        self.images_root = images_root
         self.transformations = transformations
 
-        # If split provided, just use those
-        if im_paths is not None and im_lbls is not None:
-            self.im_paths = im_paths
-            self.im_lbls = im_lbls
-            # build class map from existing paths
-            class_names = sorted(list({self.get_class(p) for p in self.im_paths}))
-            self.cls_names: Dict[str, int] = {c: i for i, c in enumerate(class_names)}
-            self.cls_counts: Dict[str, int] = {}
-            for p in self.im_paths:
+        # if user didn't provide path, download from kaggle
+        if root_dir is None:
+            root_dir = resolve_kaggle_root(dataset_id)
+        # locate images/
+        if images_root is None:
+            images_root = find_images_folder(root_dir)
+
+        # store both paths.
+        self.root_dir = root_dir
+        self.images_root = images_root
+
+        # if we already computed splits, just take them
+        if image_paths is not None and image_labels is not None: # build train/val/test subset not scanning full dataset.
+            # rebuild class mappings and counts
+            self.image_paths = image_paths
+            self.image_labels = image_labels
+
+            class_names = sorted({self.get_class(p) for p in image_paths}) # go through every image path in split and extract folder name (class label)
+            self.class_names: Dict[str, int] = {c: i for i, c in enumerate(class_names)} # creates dictionary mapping, enumerate gives (0, 'backhand) and {c: i ...} gives class_name --> index
+
+            self.class_counts: Dict[str, int] = {} # dictionary to count images per class in split
+            # for each image path: get class, increase classe's count, if class exists return current count. if not return 0.
+            for p in image_paths: 
                 c = self.get_class(p)
-                self.cls_counts[c] = self.cls_counts.get(c, 0) + 1
+                self.class_counts[c] = self.class_counts.get(c, 0) + 1
             return
 
-        # Otherwise scan images_root/*/*.{ext}
-        all_paths: List[str] = []
-        for ext in im_files:
-            all_paths.extend(glob(os.path.join(images_root, "*", f"*{ext}")))
+        # otherwise scan the folders
+        paths: List[str] = []
+        for ext in extensions:
+            paths += glob(os.path.join(images_root, "*", f"*{ext}"))
 
-        # (Optional) filter out unwanted folders if any exist
-        self.im_paths = [
-            p for p in all_paths
-            if ("assets" not in p) and ("scripts" not in p)
-        ]
+        # filter any junk if it exists
+        self.image_paths = [p for p in paths if "assets" not in p and "scripts" not in p]
 
-        # Build label mapping from folder names
-        self.cls_names = {}
-        self.cls_counts = {}
-        for p in self.im_paths:
+        # build class -> id mapping
+        self.class_names = {}
+        self.class_counts = {}
+        # loops thorugh image path and get's class name from this image path.
+        for p in self.image_paths:
             c = self.get_class(p)
-            if c not in self.cls_names:
-                self.cls_names[c] = len(self.cls_names)
-                self.cls_counts[c] = 0
-            self.cls_counts[c] += 1
+            # if this is the first time seeing class, assign it to the next avaliable interger id.
+            if c not in self.class_names:
+                self.class_names[c] = len(self.class_names)
+                self.class_counts[c] = 0
+            self.class_counts[c] += 1
 
-        self.im_lbls = [self.cls_names[self.get_class(p)] for p in self.im_paths]
+        #for each image path, get class folder name nad convert class name into integer label so self.im_path[i] matches self.image_labels[i]
+        self.image_labels = [self.class_names[self.get_class(p)] for p in self.image_paths]
 
+    # helper function, extract the class label from a file path.
     def get_class(self, path: str) -> str:
+        # class name is just the folder name
         return os.path.basename(os.path.dirname(path))
 
-    def __len__(self) -> int:
-        return len(self.im_paths)
+    # helper function: how many items are in the database. (how many batches per epoch)
+    def __len__(self):
+        return len(self.image_paths)
 
-    def __getitem__(self, idx: int):
-        im_path = self.im_paths[idx]
-        im = Image.open(im_path).convert("RGB")
-        gt = int(self.im_lbls[idx])
-        if self.transformations is not None:
-            im = self.transformations(im)
-        return im, gt
+    # defines what happens when DataLoader asks for one sample.
+    def __getitem__(self, index):
+        path = self.image_paths[index] 
+        y = int(self.image_labels[index]) # gets path and integer label for same index
 
+        img = Image.open(path).convert("RGB") # force it into RGB
+        if self.transformations: # prevents issues if an image is grayscale or alpha channel.
+            img = self.transformations(img)
+
+        return img, y # returns image_tensor, label_int
+
+
+
+    # takes all impages, splits them into balances train/val/test sets returns Dataloaders ready for training and eval.
     @classmethod
     def stratified_split_dls(
-        cls,
+        cls, 
         transformations,
         dataset_id: str = "orvile/tennis-player-actions-dataset",
-        root_dir: Optional[str] = None,
-        images_root: Optional[str] = None,
-        bs: int = 16,
+        bs: int = 32,
         split=(0.8, 0.1, 0.1),
         ns: int = 4,
         seed: int = 2025,
     ):
-        dataset = cls(
-            dataset_id=dataset_id,
-            root_dir=root_dir,
-            images_root=images_root,
-            transformations=transformations,
-            seed=seed,
+        """
+        transformation: preprocessing for images
+        dataset_id: kaggle dataset to download/use
+        bs: batch size
+        split (train %, val %, test %)
+        ns: num_worders for dataloader speed
+        seed: random seed
+        """
+        # create dataset.
+        ds = cls(dataset_id=dataset_id, transformations=transformations, seed=seed)
+
+        # all file paths and interger labels
+        X = ds.image_paths
+        y = ds.image_labels
+
+        # first split: train vs temp (val+test)
+        train_X, temp_X, train_y, temp_y = train_test_split(
+            X, y,
+            test_size=(split[1] + split[2]), # test_size=(0.1 + 0.1) = 0.2 = temp gest 20%
+            stratify=y, # keeps classes balances in both splits
+            random_state=seed
         )
 
-        im_paths = dataset.im_paths
-        labels = dataset.im_lbls
-
-        train_paths, temp_paths, train_lbls, temp_lbls = train_test_split(
-            im_paths,
-            labels,
-            test_size=(split[1] + split[2]),
-            stratify=labels,
-            random_state=seed,
-        )
-
+        #Splits temp into val and test while keeping class balance.
         val_ratio = split[1] / (split[1] + split[2])
-        val_paths, test_paths, val_lbls, test_lbls = train_test_split(
-            temp_paths,
-            temp_lbls,
+        val_X, test_X, val_y, test_y = train_test_split(
+            temp_X, temp_y,
             test_size=(1 - val_ratio),
-            stratify=temp_lbls,
-            random_state=seed,
+            stratify=temp_y,
+            random_state=seed
         )
 
-        train_ds = cls(dataset_id=dataset_id, root_dir=dataset.root_dir, images_root=dataset.images_root,
-                       transformations=transformations, im_paths=train_paths, im_lbls=train_lbls, seed=seed)
-        val_ds   = cls(dataset_id=dataset_id, root_dir=dataset.root_dir, images_root=dataset.images_root,
-                       transformations=transformations, im_paths=val_paths,   im_lbls=val_lbls, seed=seed)
-        test_ds  = cls(dataset_id=dataset_id, root_dir=dataset.root_dir, images_root=dataset.images_root,
-                       transformations=transformations, im_paths=test_paths,  im_lbls=test_lbls, seed=seed)
+        # train val and test dataset
+        train_ds = cls(dataset_id=dataset_id, root_dir=ds.root_dir, images_root=ds.images_root,
+                       transformations=transformations, image_paths=train_X, image_labels=train_y, seed=seed)
+        val_ds = cls(dataset_id=dataset_id, root_dir=ds.root_dir, images_root=ds.images_root,
+                     transformations=transformations, image_paths=val_X, image_labels=val_y, seed=seed)
+        test_ds = cls(dataset_id=dataset_id, root_dir=ds.root_dir, images_root=ds.images_root,
+                      transformations=transformations, image_paths=test_X, image_labels=test_y, seed=seed)
 
-        train_dl = DataLoader(train_ds, batch_size=bs, shuffle=True,  num_workers=ns)
-        val_dl   = DataLoader(val_ds,   batch_size=bs, shuffle=False, num_workers=ns)
-        test_dl  = DataLoader(test_ds,  batch_size=1,  shuffle=False, num_workers=ns)
+        # lets dataloader load in parellel, keesp worder processes alive.
+        common = dict(num_workers=ns, persistent_workers=(ns > 0))
+        if ns > 0:
+            common["prefetch_factor"] = 2
 
-        return train_dl, val_dl, test_dl, dataset.cls_names
+        # create dataloaders for train, val, and test
+        train_dl = DataLoader(train_ds, batch_size=bs, shuffle=True, **common)
+        val_dl = DataLoader(val_ds, batch_size=bs, shuffle=False, **common)
+        test_dl = DataLoader(test_ds, batch_size=1, shuffle=False, **common)
+        
+        # return all values from dataloaders and dataset class names mappings to ids. 
+        return train_dl, val_dl, test_dl, ds.class_names
