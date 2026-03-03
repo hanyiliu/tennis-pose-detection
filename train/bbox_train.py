@@ -8,11 +8,10 @@ from torchvision import transforms
 from data.bbox_dataset import TennisBBoxDataset
 from models.bbox_detection import BBoxDetectionModel
 import kagglehub
+from torch.utils.data import Subset
 
 if os.path.basename(os.getcwd()) == "eda":
     os.chdir("..")
-
-print(f"Current working directory: {os.getcwd()}")
 
 # Set download path to root dir, kagglehub automatically creates datasets subdir
 # os.environ["KAGGLEHUB_CACHE"] = ""
@@ -24,11 +23,6 @@ path = os.path.join(
     "Tennis Player Actions Dataset for Human Pose Estimation"
 )
 
-print("Path to dataset files:", path)
-print("annotations files:", os.listdir(os.path.join(path, "annotations"))[:5])
-print("images subdirs:", os.listdir(os.path.join(path, "images")))
-
-# do we need this idk
 # checking which GPU we're using (NVIDIA vs Apple vs other)
 def get_device():
     if torch.cuda.is_available():
@@ -99,7 +93,14 @@ def bbox_iou_xyxy(pred, target, eps=1e-7):
     union = p_area + t_area - inter
     return inter / (union + eps)
 
-@torch.no_grad()
+def iou_loss_cxcywh(preds: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    # IoU loss = mean(1 - IoU), where IoU is computed after converting cxcywh -> xyxy
+    preds_xyxy = cxcywh_to_xyxy(preds).clamp(0, 1)
+    targets_xyxy = cxcywh_to_xyxy(targets).clamp(0, 1)
+    ious = bbox_iou_xyxy(preds_xyxy, targets_xyxy)
+    return (1.0 - ious).mean()
+
+@torch.no_grad() # disables gradient tracking for evaluation
 def iou_evaluate(model, loader, criterion, device, iou_thresholds=(0.5, 0.75)):
     model.eval()
     total_loss = 0.0
@@ -121,11 +122,8 @@ def iou_evaluate(model, loader, criterion, device, iou_thresholds=(0.5, 0.75)):
         preds = preds.clamp(0, 1)
         bboxes = bboxes.clamp(0, 1)
         
-        preds_xyxy = cxcywh_to_xyxy(preds)
-        bboxes_xyxy = cxcywh_to_xyxy(bboxes)
-        
-        preds_xyxy = preds_xyxy.clamp(0, 1)
-        bboxes_xyxy = bboxes_xyxy.clamp(0, 1)
+        preds_xyxy = cxcywh_to_xyxy(preds).clamp(0, 1)
+        bboxes_xyxy = cxcywh_to_xyxy(bboxes).clamp(0, 1)
         
         ious = bbox_iou_xyxy(preds_xyxy, bboxes_xyxy)
         sum_iou += ious.sum().item()
@@ -137,29 +135,6 @@ def iou_evaluate(model, loader, criterion, device, iou_thresholds=(0.5, 0.75)):
     acc = {thr: correct[thr] / max(n, 1) for thr in iou_thresholds}
     return avg_loss, mean_iou, acc
 
-@torch.no_grad() # disables gradient tracking for evaluation
-# LOL found this out to make eval more efficient
-def evaluate(model, loader, criterion, device):
-    model.eval()
-    total_loss = 0.0
-    n = 0 # total number of samples seen so far
-    
-    for imgs, bboxes in loader:
-        imgs = imgs.to(device)
-        bboxes = bboxes.to(device)
-        
-        preds = model(imgs)
-        loss = criterion(preds, bboxes)
-        
-        # bs = batch size
-        # computing batch average -> total batch loss ->
-        # average of the whole dataset
-        bs = imgs.size(0)
-        total_loss += loss.item() * bs
-        n += bs
-        
-    return total_loss / max(n, 1)
-
 def main():
     parser = argparse.ArgumentParser()
     # where the dataset folder is
@@ -167,19 +142,19 @@ def main():
     # number of epochs over training set
     parser.add_argument("--epochs", type=int, default=50)
     # how many images per step
-    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--batch_size", type=int, default=32)
     # learning rate
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=3e-4)
     # data train test split
     parser.add_argument("--train_split", type=float, default=0.7)
     parser.add_argument("--val_split", type=float, default=0.15)
     parser.add_argument("--test_split", type=float, default=0.15)
     # makes splits and reproducibility more consistent
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--iou_lambda", type=float, default=0.5)
+    parser.add_argument("--weight_decay", type=float, default=1e-4)
     args = parser.parse_args()
     
-    total = args.train_split + args.val_split + args.test_split
-
     torch.manual_seed(args.seed)
     
     annotation_files = [
@@ -189,27 +164,44 @@ def main():
         "annotations/serve.json",
     ]
     
-    transform = transforms.Compose([
-        transforms.Resize((256, 256)),
+    train_transform = transforms.Compose([
+        transforms.Resize((384, 384)),
+        transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.02),
         transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                            std=[0.229, 0.224, 0.225]),
     ])
     
-    dataset = TennisBBoxDataset(args.root_dir, annotation_files, transform=transform)
+    eval_transform = transforms.Compose([
+        transforms.Resize((384, 384)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                            std=[0.229, 0.224, 0.225]),
+    ])
     
-    dataset_size = len(dataset)
+    train_dataset = TennisBBoxDataset(args.root_dir, annotation_files, transform=train_transform)
+    eval_dataset  = TennisBBoxDataset(args.root_dir, annotation_files, transform=eval_transform)
+
+    dataset_size = len(train_dataset)
     train_size = int(dataset_size * args.train_split)
-    val_size = int(dataset_size * args.val_split)
-    test_size = dataset_size - train_size - val_size
-    
-    train_ds, val_ds, test_ds = random_split(
-            dataset,
-            [train_size, val_size, test_size],
-            generator=torch.Generator().manual_seed(args.seed)
-        )
+    val_size   = int(dataset_size * args.val_split)
+    test_size  = dataset_size - train_size - val_size
+
+    # split indices, not dataset objects, for reproducibility
+    g = torch.Generator().manual_seed(args.seed)
+    perm = torch.randperm(dataset_size, generator=g).tolist()
+
+    train_idx = perm[:train_size]
+    val_idx   = perm[train_size:train_size + val_size]
+    test_idx  = perm[train_size + val_size:]
+
+    train_ds = Subset(train_dataset, train_idx)
+    val_ds   = Subset(eval_dataset,  val_idx)
+    test_ds  = Subset(eval_dataset,  test_idx)
     
     # DataLoader does:
-    # batching - returns batches instead of single samples
-    # shuffling: randomizes order each epoch (training only)
+    # batching- returns batches instead of single samples
+    # shuffling- randomizes order each epoch (training only)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
@@ -223,8 +215,10 @@ def main():
     
     criterion = nn.SmoothL1Loss()
     # Adam updates weights to reduce loss
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=0.5, patience=5
+    )
     # shape and correct fc1 size sanity check
     # runs one batch through the odel to catch FC layer input size mismatch
     imgs0, _ = next(iter(train_loader))
@@ -236,8 +230,9 @@ def main():
         raise e
     
     # track best model and creates a checkpoint folder
-    best_val = float("inf")
+    best_val_mean_iou = -1.0
     os.makedirs("checkpoints", exist_ok=True)
+    
     
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -251,7 +246,9 @@ def main():
             # clears old gradients
             optimizer.zero_grad()
             preds = model(imgs)
-            loss = criterion(preds, bboxes)
+            loss_reg = criterion(preds, bboxes)
+            loss_iou = iou_loss_cxcywh(preds, bboxes)
+            loss = loss_reg + args.iou_lambda * loss_iou
             # computes gradients
             loss.backward()
             # udpates weights
@@ -264,23 +261,24 @@ def main():
         # average loss over all training samples for this epoch
         train_loss = total_loss / max(n, 1)
         # runs model on validation set
-        val_loss = evaluate(model, val_loader, criterion, device)
+        val_loss, val_mean_iou, val_acc = iou_evaluate(model, val_loader, criterion, device)
+
+        scheduler.step(val_loss)
+
+        print(f"Epoch {epoch:02d}/{args.epochs}  train_loss: {train_loss:.5f}  val_loss: {val_loss:.5f}  val_acc@0.50: {val_acc[0.5]*100:.2f}% val_acc@0.75: {val_acc[0.75]*100:.2f}%")
         
-        print(f"Epoch {epoch:02d}/{args.epochs}  train_loss: {train_loss:.5f}  val_loss: {val_loss:.5f}")
-        
-        if val_loss < best_val:
-            best_val = val_loss
+        if best_val_mean_iou < val_mean_iou:
+            best_val_mean_iou = val_mean_iou
             torch.save(model.state_dict(), "checkpoints/bbox_best.pt")
-    
-    print("\n Best val loss:", best_val)
     
     # load best checkpoint before testing
     model.load_state_dict(torch.load("checkpoints/bbox_best.pt", map_location=device))
-    test_loss, mean_iou, accuracy = iou_evaluate(model, test_loader, criterion, device)
+    test_loss, test_mean_iou, test_acc = iou_evaluate(model, test_loader, criterion, device)
     
-    print("\n Best test loss:", best_val)
-    print(f"accuracy@0.50: {accuracy[0.5]*100} %")
-    print(f"accuracy@0.75: {accuracy[0.75]*100} %")
+    print("\n Test loss:", test_loss)
+    print("\n Test mean IoU:", test_mean_iou)
+    print(f"accuracy@0.50: {test_acc[0.5]*100} %")
+    print(f"accuracy@0.75: {test_acc[0.75]*100} %")
     
 if __name__ == "__main__":
     main()
