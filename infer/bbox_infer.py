@@ -35,9 +35,9 @@ def get_device():
     return torch.device("cpu")
 
 # runs bbox model on a single image
-# returns pixel bbox [x, y, w, h] in the ORIGINAL image coordinate system
+# returns pixel bbox [x1, y1, w, h] in the ORIGINAL image coordinate system
 # as floats
-def infer_bbox(img_path: str, checkpoint_path: str="checkpoints/bbox_best.pt", resize: tuple[int, int]=(256, 256)):
+def infer_bbox(img_path: str, checkpoint_path: str="checkpoints/bbox_best.pt", resize: tuple[int, int]=(384, 384)):
 
     device = get_device()
     
@@ -50,35 +50,48 @@ def infer_bbox(img_path: str, checkpoint_path: str="checkpoints/bbox_best.pt", r
     transform = transforms.Compose([
         transforms.Resize(resize),
         transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                            std=[0.229, 0.224, 0.225]),
     ])
 
     img = Image.open(img_path).convert("RGB")
 
     W_original, H_original = img.size
-    img_tensor = transform(img).unsqueeze(0).to(device) # (1, 3, 256, 256)
+    img_tensor = transform(img).unsqueeze(0).to(device)
 
     with torch.no_grad():
         pred = model(img_tensor)[0].cpu() # pred contains normalized values
         
-    x = pred[0].item() * W_original
-    y = pred[1].item() * H_original
-    w = pred[2].item() * W_original
-    h = pred[3].item() * H_original
+    pred = pred.clamp(0, 1)
+    cx, cy, bw, bh = pred.tolist()
+    x1 = (cx - bw / 2) * W_original
+    y1 = (cy - bh / 2) * H_original
+    x2 = (cx + bw / 2) * W_original
+    y2 = (cy + bh / 2) * H_original
+    
+    
+    x1 = max(0, min(W_original - 1, x1))
+    y1 = max(0, min(H_original - 1, y1))
+    x2 = max(0, min(W_original - 1, x2))
+    y2 = max(0, min(H_original - 1, y2))
+    
+    w = x2 - x1
+    h = y2 - y1
 
     print("Predicted bounding box:")
-    print(f"x_min: {x:.2f}, y_min: {y:.2f}, width: {w:.2f}, height: {h:.2f}")
+    print(f"x1: {x1:.2f}, y1: {y1:.2f}, width: {w:.2f}, height: {h:.2f}")
     
     fig, ax = plt.subplots(1)
     ax.imshow(img)
 
-    rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor='r', facecolor='none')
+    rect = patches.Rectangle((x1, y1), w, h, linewidth=2, edgecolor='r', facecolor='none')
     ax.add_patch(rect)
     plt.show()
 
-    return [x, y, w, h]
+    return [x1, y1, w, h]
 
 if __name__ == "__main__":
     images_dir = os.path.join(path, "images")
-    img_path = os.path.join(images_dir, "backhand", "B_001.jpeg")
+    img_path = os.path.join(images_dir, "serve", "S_100.jpeg")
     bbox = infer_bbox(img_path)
     
