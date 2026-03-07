@@ -1,12 +1,12 @@
-import torchvision.transforms as transforms
+import torchvision.transforms as torch_transforms
 
 def convert_image_to_tensor(image):
     """
     Converts a PIL RGB image to a tensor representation.
     Shape: (# of channels, image_height, image_width)
     """
-    transforms = transforms.Compose([
-        transforms.ToTensor(),
+    transform = torch_transforms.Compose([
+        torch_transforms.ToTensor(),
     ])
 
-    return transforms(image)
+    return transform(image)
