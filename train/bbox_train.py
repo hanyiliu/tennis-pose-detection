@@ -91,7 +91,7 @@ def main():
     ]
     
     transform = transforms.Compose([
-        transforms.Resize((256, 256)),
+        transforms.Resize((384, 384)),
         transforms.ToTensor(),
     ])
     
