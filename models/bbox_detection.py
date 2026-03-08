@@ -29,7 +29,6 @@ class BBoxDetectionModel(nn.Module):
         x = self.pool(F.relu(self.conv2(x)))
         x = self.pool(F.relu(self.conv3(x)))
         
-        print(x.shape)
         # flattening
         # ex: (B, 64, 90, 160) -> (B, 921600)
         x = x.view(x.size(0), -1)
