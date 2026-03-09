@@ -39,7 +39,7 @@ def main():
     ])
 
     # preprocessing steps.
-    training_dataloader, validation_dataloader, ts_dl, classes = TennisImageClassDataset.stratified_split_dls(
+    training_dataloader, validation_dataloader, testset_dataloader, classes = TennisImageClassDataset.stratified_split_dls(
         transformations=tfs,
         dataset_id=dataset_id,
         bs=bs,
@@ -58,10 +58,7 @@ def main():
         lr=3e-4,
         save_dir="saved_models",
         save_prefix=f"tennis_timm_resnet18_{im_size}",
-        freeze_backbone=False,
-        dev_mode=False,
     )
-
     # creates trainer and start training, creates an instance of the trianing class.
     # passes in, class mapping, training Data loader, validation data loader, device, config settings.
     trainer = TrainValidation(classes=classes, training_dataloader=training_dataloader, validation_dataloader=validation_dataloader, device=device, cfg=config)

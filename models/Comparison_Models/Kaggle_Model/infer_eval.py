@@ -8,6 +8,7 @@ import timm
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
 from tqdm import tqdm
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classification_report
 from torchvision import transforms as T
@@ -72,12 +73,16 @@ def main():
         T.Normalize(mean=mean, std=std),
     ])
 
-    # rebuild the same kind of split (stratified) and then evaluate test. 
-    tr_dl, val_dl, test_dl, class_map = TennisImageClassDataset.stratified_split_dls(
+    # rebuild the same stratified dataset split used during training
+    training_dataloader, validation_dataloader, test_dataloader, class_map = TennisImageClassDataset.stratified_split_dls(
         transformations=tfs,
         bs=bs,
-        ns=4,
+        num_workers=4,
     )
+
+    print("Train size:", len(training_dataloader.dataset))
+    print("Val size:", len(validation_dataloader.dataset))
+    print("Test size:", len(test_dataloader.dataset))
     
     # prints class-to-id mapping to verify label order
     print("Class Mapping:", class_map)
@@ -90,7 +95,7 @@ def main():
     model.to(device)
 
     # runs inference on test data loader
-    y_true, y_pred = run_inference(model, test_dl, device)
+    y_true, y_pred = run_inference(model, test_dataloader, device)
 
     # computes metrics: accuracy and macro F1
     # (macro F1 calcualtes unweighted averages of F1 scores for each class, treats all classes equally regardless of frequency.)
@@ -106,31 +111,84 @@ def main():
     inverse = {v: k for k, v in class_map.items()}
     names = [inverse[i] for i in range(len(inverse))]
 
-
     # print report and confusion matrix
     print("\nClassification Report:")
     print(classification_report(y_true, y_pred, target_names=names))
 
+    # builds confusion matrix using true labels and predicted labels.
     cm = confusion_matrix(y_true, y_pred)
 
+    # makes sure output folder exists before saving the graphs and csv.
     os.makedirs("evaluation_outputs", exist_ok=True)
 
-    plt.figure(figsize=(6, 5))
-    plt.imshow(cm)
-    plt.title("Confusion Matrix (Test)")
-    plt.xticks(range(len(names)), names, rotation=45)
-    plt.yticks(range(len(names)), names)
-    plt.xlabel("Pred")
-    plt.ylabel("True")
+    # creates a cleaner heatmap style confusion matrix.
+    # annot=True writes the counts in each square.
+    # fmt="d" makes the values show as integers.
+    plt.figure(figsize=(7, 6))
+    sns.heatmap(
+        cm,
+        annot=True,
+        fmt="d",
+        cmap="Blues",
+        xticklabels=names,
+        yticklabels=names
+    )
+
+    # titles and axis labels for confusion matrix graph.
+    plt.title("Confusion Matrix (Predicted vs Actual)")
+    plt.xlabel("Predicted Label")
+    plt.ylabel("True Label")
+
+    # makes spacing cleaner so labels do not overlap.
     plt.tight_layout()
+
+    # saves confusion matrix graph.
     plt.savefig("evaluation_outputs/confusion_matrix.png")
     plt.close()
 
+    print("Confusion matrix saved to evaluation_outputs/confusion_matrix.png")
+
+    # gets full classification report as a dictionary so we can grab class f1-scores.
+    report_dict = classification_report(y_true, y_pred, target_names=names, output_dict=True)
+
+    # collects per-class f1 scores in same order as class names.
+    per_class_f1 = [report_dict[class_name]["f1-score"] for class_name in names]
+
+    # creates bar chart for per-class f1 scores.
+    plt.figure(figsize=(7, 5))
+    plt.bar(names, per_class_f1)
+
+    # graph title and labels.
+    plt.title("Per-Class F1 Score")
+    plt.xlabel("Tennis Action Class")
+    plt.ylabel("F1 Score")
+
+    # f1 score ranges from 0 to 1, so keep y-axis in that range.
+    plt.ylim(0, 1.0)
+
+    # rotates x labels so they are easier to read.
+    plt.xticks(rotation=25)
+
+    # writes exact f1 score above each bar.
+    for i, score in enumerate(per_class_f1):
+        plt.text(i, score + 0.02, f"{score:.2f}", ha="center")
+
+    # makes layout cleaner.
+    plt.tight_layout()
+
+    # saves f1 bar chart.
+    plt.savefig("evaluation_outputs/per_class_f1_scores.png")
+    plt.close()
+
+    print("Per-class F1 chart saved to evaluation_outputs/per_class_f1_scores.png")
+
+    # saves predictions into csv file for later analysis if needed.
     df = pd.DataFrame({"true_label": y_true, "pred_label": y_pred})
     df.to_csv("evaluation_outputs/test_predictions.csv", index=False)
 
     print("Saved:")
     print("- evaluation_outputs/confusion_matrix.png")
+    print("- evaluation_outputs/per_class_f1_scores.png")
     print("- evaluation_outputs/test_predictions.csv")
 
 
