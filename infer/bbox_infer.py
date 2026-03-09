@@ -37,7 +37,7 @@ def get_device():
 # runs bbox model on a single image
 # returns pixel bbox [x1, y1, w, h] in the ORIGINAL image coordinate system
 # as floats
-def infer_bbox(img_path: str, checkpoint_path: str="checkpoints/bbox_best.pt", resize: tuple[int, int]=(384, 384)):
+def infer_bbox(img_path: str, checkpoint_path: str="checkpoints/bbox_best.pt", resize: tuple[int, int]=(256, 256)):
 
     device = get_device()
     
@@ -50,8 +50,6 @@ def infer_bbox(img_path: str, checkpoint_path: str="checkpoints/bbox_best.pt", r
     transform = transforms.Compose([
         transforms.Resize(resize),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                            std=[0.229, 0.224, 0.225]),
     ])
 
     img = Image.open(img_path).convert("RGB")
@@ -63,11 +61,11 @@ def infer_bbox(img_path: str, checkpoint_path: str="checkpoints/bbox_best.pt", r
         pred = model(img_tensor)[0].cpu() # pred contains normalized values
         
     pred = pred.clamp(0, 1)
-    cx, cy, bw, bh = pred.tolist()
-    x1 = (cx - bw / 2) * W_original
-    y1 = (cy - bh / 2) * H_original
-    x2 = (cx + bw / 2) * W_original
-    y2 = (cy + bh / 2) * H_original
+    min_x, min_y, bw, bh = pred.tolist()
+    x1 = min_x * W_original
+    y1 = min_y * H_original
+    x2 = (min_x + bw) * W_original
+    y2 = (min_y + bh) * H_original
     
     
     x1 = max(0, min(W_original - 1, x1))
@@ -92,6 +90,6 @@ def infer_bbox(img_path: str, checkpoint_path: str="checkpoints/bbox_best.pt", r
 
 if __name__ == "__main__":
     images_dir = os.path.join(path, "images")
-    img_path = os.path.join(images_dir, "serve", "S_100.jpeg")
+    img_path = os.path.join(images_dir, "forehand", "F_067.jpeg")
     bbox = infer_bbox(img_path)
     
