@@ -10,10 +10,7 @@ from models.pose_classification import PoseClassificationModel
 from preprocessing.tensor_preprocessing import normalize_keypoints_xy
 
 
-# -----------------------------------
 # Device
-# -----------------------------------
-
 def get_device():
     if torch.cuda.is_available():
         return torch.device("cuda")
@@ -22,10 +19,7 @@ def get_device():
     return torch.device("cpu")
 
 
-# -----------------------------------
 # Load keypoints from Kaggle JSON
-# -----------------------------------
-
 def load_keypoints(json_path: str, ann_index: int = 0):
     """
     Loads one sample's keypoints from COCO annotation file.
@@ -61,10 +55,7 @@ def load_keypoints(json_path: str, ann_index: int = 0):
     return keypoints_t, height, width
 
 
-# -----------------------------------
 # Pose Inference
-# -----------------------------------
-
 def infer_pose(
     keypoints: torch.Tensor,
     H: int,
@@ -74,7 +65,7 @@ def infer_pose(
 
     device = get_device()
 
-    # ---- Normalize to match training ----
+    # Normalize to match training
     keypoints = normalize_keypoints_xy(keypoints, H, W)
 
     # add batch dimension if needed
@@ -83,7 +74,7 @@ def infer_pose(
 
     keypoints = keypoints.to(device)
 
-    # ---- Load checkpoint ----
+    # Load checkpoint
     checkpoint = torch.load(checkpoint_path, map_location=device)
 
     args = checkpoint.get("args", {})
@@ -136,10 +127,7 @@ def infer_pose(
     return pred_index, probs.cpu()
 
 
-# -----------------------------------
 # Run Example From Kaggle Dataset
-# -----------------------------------
-
 if __name__ == "__main__":
     import random
     import kagglehub
