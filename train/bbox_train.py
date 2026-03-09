@@ -1,15 +1,21 @@
 from torch.utils.data import DataLoader
 import torch
 import os
+import sys
 
 import argparse
 import torch.nn as nn
 from torchvision import transforms
+import kagglehub
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 from data.bbox_dataset import TennisBBoxDataset
 from models.bbox_detection import BBoxDetectionModel
 import kagglehub
 from torch.utils.data import Subset
-
 from torchvision.ops import complete_box_iou_loss
 
 if os.path.basename(os.getcwd()) == "eda":
