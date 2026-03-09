@@ -16,7 +16,6 @@ from data.bbox_dataset import TennisBBoxDataset
 from models.bbox_detection import BBoxDetectionModel
 import kagglehub
 from torch.utils.data import Subset
-
 from torchvision.ops import complete_box_iou_loss
 
 if os.path.basename(os.getcwd()) == "eda":
