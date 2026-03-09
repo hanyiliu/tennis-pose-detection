@@ -1,5 +1,7 @@
 # train/run_timm_baseline.py
 
+# chooses devince, defines preprocessing transformations, gets data loaders and creates training configs, launches training process from train_timm.py
+
 import torch
 from torchvision import transforms as T
 
@@ -7,6 +9,7 @@ from models.Comparison_Models.Kaggle_Model.dataset import TennisImageClassDatase
 from models.Comparison_Models.Kaggle_Model.train_timm import TrainValidation, TrainConfig
 
 
+# helper function helps decide which device to use.
 def pick_device():
     if torch.cuda.is_available():
         return "cuda"
@@ -16,34 +19,39 @@ def pick_device():
 
 
 def main():
+    # stores kaggle ID as string
     dataset_id = "orvile/tennis-player-actions-dataset"
 
     # ImageNet normalization (works fine for timm pretrained models)
     mean = [0.485, 0.456, 0.406]
     std = [0.229, 0.224, 0.225]
 
+    # image size, batch size, number of workers processes can help load images in parellel (faster data loading and reduces wait time)
     im_size = 160
     bs = 32
-    ns = 4
+    num_workers = 4
 
+    # standardized values for image.
     tfs = T.Compose([
         T.Resize((im_size, im_size)),
         T.ToTensor(),
         T.Normalize(mean=mean, std=std),
     ])
 
-    tr_dl, val_dl, ts_dl, classes = TennisImageClassDataset.stratified_split_dls(
+    # preprocessing steps.
+    training_dataloader, validation_dataloader, ts_dl, classes = TennisImageClassDataset.stratified_split_dls(
         transformations=tfs,
         dataset_id=dataset_id,
         bs=bs,
-        ns=ns,
+        num_workers=num_workers,
     )
 
     device = pick_device()
     print("Using device:", device)
     print("Class map:", classes)
 
-    cfg = TrainConfig(
+    # creates TrainConfig object, stores all the training settings in one place.
+    config = TrainConfig(
         model_name="resnet18",
         epochs=8,
         patience=2,
@@ -54,7 +62,9 @@ def main():
         dev_mode=False,
     )
 
-    trainer = TrainValidation(classes=classes, tr_dl=tr_dl, val_dl=val_dl, device=device, cfg=cfg)
+    # creates trainer and start training, creates an instance of the trianing class.
+    # passes in, class mapping, training Data loader, validation data loader, device, config settings.
+    trainer = TrainValidation(classes=classes, training_dataloader=training_dataloader, validation_dataloader=validation_dataloader, device=device, cfg=config)
     trainer.run()
 
 

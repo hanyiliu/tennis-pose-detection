@@ -1,5 +1,8 @@
 # models/Comparison_Models/Kaggle_Model/dataset.py
 
+# downloads and accesses dataset from Kaggle, finds images and their paths, conversts class folder names into numeric labels,
+# splits dataset into train / val / test, wraps each split into data loader.
+
 import os
 from glob import glob # finds files by wildcard patterns
 from typing import Dict, List, Optional

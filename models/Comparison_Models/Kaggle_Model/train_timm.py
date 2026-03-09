@@ -1,5 +1,6 @@
 # models/Comparison_Models/Kaggle_Model/train_timm.py
-# Takes training data and teaches a pretrained ResNet18 to classify tennis action, monitor validation performance and saves best version of the model and stops early if not improving.
+# Takes training data and teaches a pretrained ResNet18 to classify tennis action, 
+# monitor validation performance and saves best version of the model and stops early if not improving.
 
 import os
 from dataclasses import dataclass
@@ -130,11 +131,11 @@ class TrainValidation:
                 break
 
             print(f"\nEpoch {ep+1}/{self.cfg.epochs}")
-            tr_loss, tr_acc, tr_f1 = self.train_epoch()
-            va_loss, va_acc, va_f1 = self.val_epoch()
+            training_loss, tr_acc, tr_f1 = self.train_epoch()
+            validation_loss, va_acc, va_f1 = self.val_epoch()
 
-            print(f"Train: loss={tr_loss:.3f} acc={tr_acc:.3f} f1={tr_f1:.3f}")
-            print(f"Val:   loss={va_loss:.3f} acc={va_acc:.3f} f1={va_f1:.3f}")
+            print(f"Train: loss={training_loss:.3f} acc={tr_acc:.3f} f1={tr_f1:.3f}")
+            print(f"Val:   loss={validation_loss:.3f} acc={va_acc:.3f} f1={va_f1:.3f}")
 
 
             # save best checkpoint if improved, and stop training if val F1 hasn't improved for patience epochs.
