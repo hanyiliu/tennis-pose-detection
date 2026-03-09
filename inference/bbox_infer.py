@@ -5,6 +5,25 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from models.bbox_detection import BBoxDetectionModel
 import train.bbox_train
+import kagglehub
+import os
+
+if os.path.basename(os.getcwd()) == "eda":
+    os.chdir("..")
+
+print(f"Current working directory: {os.getcwd()}")
+
+# Set download path to root dir, kagglehub automatically creates datasets subdir
+os.environ["KAGGLEHUB_CACHE"] = ""
+
+# Download latest version
+path = kagglehub.dataset_download("orvile/tennis-player-actions-dataset")
+path = os.path.join(
+    path,
+    "Tennis Player Actions Dataset for Human Pose Estimation"
+)
+
+print("Path to dataset files:", path)
 
 # checking which GPU we're using (NVIDIA vs Apple vs other)
 def get_device():
@@ -16,7 +35,7 @@ def get_device():
     return torch.device("cpu")
 
 # runs bbox model on a single image
-# returns pixel bbox [x, y, w, h] in the ORIGINAL image coordinate system
+# returns pixel bbox [x1, y1, w, h] in the ORIGINAL image coordinate system
 # as floats
 def infer_bbox(img_path: str, checkpoint_path: str="checkpoints/bbox_best.pt", resize: tuple[int, int]=(256, 256)):
 
@@ -24,7 +43,7 @@ def infer_bbox(img_path: str, checkpoint_path: str="checkpoints/bbox_best.pt", r
     
     # load model + weights
     model = BBoxDetectionModel()
-    model.load_state_dict(torch.load("checkpoints/bbox_best.pt", map_location=device))
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
     model.to(device)
     model.eval()
 
@@ -36,29 +55,41 @@ def infer_bbox(img_path: str, checkpoint_path: str="checkpoints/bbox_best.pt", r
     img = Image.open(img_path).convert("RGB")
 
     W_original, H_original = img.size
-    img_tensor = transform(img).unsqueeze(0).to(device) # (1, 3, 256, 256)
+    img_tensor = transform(img).unsqueeze(0).to(device)
 
     with torch.no_grad():
         pred = model(img_tensor)[0].cpu() # pred contains normalized values
         
-    x = pred[0].item() * W_original
-    y = pred[1].item() * H_original
-    w = pred[2].item() * W_original
-    h = pred[3].item() * H_original
+    pred = pred.clamp(0, 1)
+    min_x, min_y, bw, bh = pred.tolist()
+    x1 = min_x * W_original
+    y1 = min_y * H_original
+    x2 = (min_x + bw) * W_original
+    y2 = (min_y + bh) * H_original
+    
+    
+    x1 = max(0, min(W_original - 1, x1))
+    y1 = max(0, min(H_original - 1, y1))
+    x2 = max(0, min(W_original - 1, x2))
+    y2 = max(0, min(H_original - 1, y2))
+    
+    w = x2 - x1
+    h = y2 - y1
 
     print("Predicted bounding box:")
-    print(f"x_min: {x:.2f}, y_min: {y:.2f}, width: {w:.2f}, height: {h:.2f}")
+    print(f"x1: {x1:.2f}, y1: {y1:.2f}, width: {w:.2f}, height: {h:.2f}")
     
     fig, ax = plt.subplots(1)
     ax.imshow(img)
 
-    rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor='r', facecolor='none')
+    rect = patches.Rectangle((x1, y1), w, h, linewidth=2, edgecolor='r', facecolor='none')
     ax.add_patch(rect)
     plt.show()
 
-    return [x, y, w, h]
+    return [x1, y1, w, h]
 
 if __name__ == "__main__":
-    img_path = "images/backhand/B_001.jpeg"
+    images_dir = os.path.join(path, "images")
+    img_path = os.path.join(images_dir, "forehand", "F_067.jpeg")
     bbox = infer_bbox(img_path)
     
