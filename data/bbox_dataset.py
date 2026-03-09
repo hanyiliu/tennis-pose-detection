@@ -74,11 +74,11 @@ class TennisBBoxDataset(Dataset):
         # normalizes bounding box to make learning easier
         # converts pixel coordinates to normalized coordinates (0-1)
         # python list -> PyTorch tensor
-        cx = (x + w / 2) / W
-        cy = (y + h / 2) / H
+        min_x = x / W
+        min_y = y / H
         bw = w / W
         bh = h / H
-        bbox = torch.tensor([cx, cy, bw, bh], dtype=torch.float32)
+        bbox = torch.tensor([min_x, min_y, bw, bh], dtype=torch.float32)
         
         if self.transform:
             img = self.transform(img)

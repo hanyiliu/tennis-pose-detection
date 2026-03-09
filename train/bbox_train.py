@@ -1,4 +1,4 @@
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 import torch
 import os
 
@@ -9,6 +9,8 @@ from data.bbox_dataset import TennisBBoxDataset
 from models.bbox_detection import BBoxDetectionModel
 import kagglehub
 from torch.utils.data import Subset
+
+from torchvision.ops import complete_box_iou_loss
 
 if os.path.basename(os.getcwd()) == "eda":
     os.chdir("..")
@@ -32,16 +34,30 @@ def get_device():
         return torch.device("mps")
     return torch.device("cpu")
 
-@torch.no_grad()
-def cxcywh_to_xyxy(boxes):
+def xywh_to_xyxy(boxes):
     # input: [min_x, min_y, w, h]
     # output: [x1, y1, x2, y2]
     
-    cx, cy, w, h = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
-    x1 = cx - w / 2
-    y1 = cy - h / 2
-    x2 = cx + w / 2
-    y2 = cy + h / 2
+    min_x, min_y, w, h = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+    x1 = min_x
+    y1 = min_y
+    x2 = min_x + w
+    y2 = min_y + h
+    return torch.stack([x1, y1, x2, y2], dim=1)
+
+# validates bbox dimensions
+def sanitize_xyxy(boxes: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    boxes = boxes.clamp(0, 1)
+
+    x1 = torch.min(boxes[:, 0], boxes[:, 2])
+    y1 = torch.min(boxes[:, 1], boxes[:, 3])
+    x2 = torch.max(boxes[:, 0], boxes[:, 2])
+    y2 = torch.max(boxes[:, 1], boxes[:, 3])
+
+    # avoid zero-width / zero-height boxes
+    x2 = torch.maximum(x2, x1 + eps)
+    y2 = torch.maximum(y2, y1 + eps)
+
     return torch.stack([x1, y1, x2, y2], dim=1)
 
 # IoU = intersection over union
@@ -60,7 +76,6 @@ def cxcywh_to_xyxy(boxes):
 #   accuracy@.75: 0%
 
 # eps = epsilon
-@torch.no_grad()
 def bbox_iou_xyxy(pred, target, eps=1e-7):
     # pred, target in [x1, y1, x2, y2]
     # returns IoU
@@ -93,12 +108,11 @@ def bbox_iou_xyxy(pred, target, eps=1e-7):
     union = p_area + t_area - inter
     return inter / (union + eps)
 
-def iou_loss_cxcywh(preds: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+def ciou_loss_xywh(preds: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     # IoU loss = mean(1 - IoU), where IoU is computed after converting cxcywh -> xyxy
-    preds_xyxy = cxcywh_to_xyxy(preds).clamp(0, 1)
-    targets_xyxy = cxcywh_to_xyxy(targets).clamp(0, 1)
-    ious = bbox_iou_xyxy(preds_xyxy, targets_xyxy)
-    return (1.0 - ious).mean()
+    preds_xyxy = sanitize_xyxy(xywh_to_xyxy(preds))
+    targets_xyxy = sanitize_xyxy(xywh_to_xyxy(targets))
+    return complete_box_iou_loss(preds_xyxy, targets_xyxy, reduction="mean")
 
 @torch.no_grad() # disables gradient tracking for evaluation
 def iou_evaluate(model, loader, criterion, device, iou_thresholds=(0.5, 0.75)):
@@ -113,7 +127,9 @@ def iou_evaluate(model, loader, criterion, device, iou_thresholds=(0.5, 0.75)):
         bboxes = bboxes.to(device)
         
         preds = model(imgs)
-        loss = criterion(preds, bboxes)
+        loss_reg = criterion(preds, bboxes)
+        loss_ciou = ciou_loss_xywh(preds, bboxes)
+        loss = loss_reg + 0.5 * loss_ciou
         bs = imgs.size(0)
         total_loss += loss.item() * bs
         n += bs
@@ -122,8 +138,8 @@ def iou_evaluate(model, loader, criterion, device, iou_thresholds=(0.5, 0.75)):
         preds = preds.clamp(0, 1)
         bboxes = bboxes.clamp(0, 1)
         
-        preds_xyxy = cxcywh_to_xyxy(preds).clamp(0, 1)
-        bboxes_xyxy = cxcywh_to_xyxy(bboxes).clamp(0, 1)
+        preds_xyxy = sanitize_xyxy(xywh_to_xyxy(preds))
+        bboxes_xyxy = sanitize_xyxy(xywh_to_xyxy(bboxes))
         
         ious = bbox_iou_xyxy(preds_xyxy, bboxes_xyxy)
         sum_iou += ious.sum().item()
@@ -165,18 +181,14 @@ def main():
     ]
     
     train_transform = transforms.Compose([
-        transforms.Resize((384, 384)),
+        transforms.Resize((256, 256)),
         transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.02),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                            std=[0.229, 0.224, 0.225]),
     ])
     
     eval_transform = transforms.Compose([
-        transforms.Resize((384, 384)),
+        transforms.Resize((256, 256)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                            std=[0.229, 0.224, 0.225]),
     ])
     
     train_dataset = TennisBBoxDataset(args.root_dir, annotation_files, transform=train_transform)
@@ -247,8 +259,8 @@ def main():
             optimizer.zero_grad()
             preds = model(imgs)
             loss_reg = criterion(preds, bboxes)
-            loss_iou = iou_loss_cxcywh(preds, bboxes)
-            loss = loss_reg + args.iou_lambda * loss_iou
+            loss_ciou = ciou_loss_xywh(preds, bboxes)
+            loss = loss_reg + args.iou_lambda * loss_ciou
             # computes gradients
             loss.backward()
             # udpates weights

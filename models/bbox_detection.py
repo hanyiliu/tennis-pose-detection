@@ -1,44 +1,53 @@
 import torch
 import torch.nn as nn
-import torchvision.models as models
+import torch.nn.functional as F
 
-
+# extracts features with 4 convolution blocks, shrinks the image 4 times with pooling,
+# flattens the result, then uses dense layers to predict 4 bounding box values.
+# nn.Module is PyTorch's base class for all neural network models
 class BBoxDetectionModel(nn.Module):
-    # pretrained ResNet18 backbone + small regression head
-    # outputs normalized bbox [min_x, min_y, w, h] in [0, 1]
-
-    def __init__(self, pretrained: bool = True, dropout: float = 0.2):
-        super().__init__()
-
-        # ResNet18
-        try:
-            weights = models.ResNet18_Weights.DEFAULT if pretrained else None
-            backbone = models.resnet18(weights=weights)
-        except Exception:
-            backbone = models.resnet18(pretrained=pretrained)
-
-        in_feats = backbone.fc.in_features
-        backbone.fc = nn.Identity() # remove classifier
-        self.backbone = backbone
-
-        # regression head
-        self.head = nn.Sequential(
-            nn.Linear(in_feats, 256),
-            nn.ReLU(inplace=True),
-            nn.Dropout(p=dropout),
-            nn.Linear(256, 4),
-        )
-
+    def __init__(self):
+        super(BBoxDetectionModel, self).__init__()
+        
+        # creating convolution layers
+        self.conv1 = nn.Conv2d(3, 16, 3, padding=1)
+        self.conv2 = nn.Conv2d(16, 32, 3, padding=1)
+        self.conv3 = nn.Conv2d(32, 64, 3, padding=1)
+        self.conv4 = nn.Conv2d(64, 128, 3, padding=1)
+        
+        # a 2x2 window slides over the input feature map
+        # reduces the spatial size of the image by half (75% reduction in total data)
+        # (B, C, H, W) -> (B, C, H/2, W/2)
+        self.pool = nn.MaxPool2d(2, 2)
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((8, 8))
+        
+        self.fc1 = nn.Linear(128 * 8 * 8, 256)
+        # maps 256 features from fc1 to 4 outputs: [x_min, y_min, width, height]
+        self.fc2 = nn.Linear(256, 4)
+        
     def forward(self, x):
-        feats = self.backbone(x) # (B, in_feats)
-        out = self.head(feats) # (B, 4)
-
-        # map to [0,1]
-        min_x = torch.sigmoid(out[:, 0])
-        min_y = torch.sigmoid(out[:, 1])
-
-        # positive width/height in [0,1]
-        w = torch.sigmoid(out[:, 2])
-        h = torch.sigmoid(out[:, 3])
-
-        return torch.stack([min_x, min_y, w, h], dim=1)
+        # extracts features, then adds non-linearity, then is shrunk spatial size by 2
+        x = self.pool(F.relu(self.conv1(x)))
+        x = self.pool(F.relu(self.conv2(x)))
+        x = self.pool(F.relu(self.conv3(x)))
+        x = self.pool(F.relu(self.conv4(x)))
+        
+        x = self.adaptive_pool(x)
+        # flattening
+        # ex: (B, 64, 90, 160) -> (B, 921600)
+        x = x.view(x.size(0), -1)
+        
+        x = F.relu(self.fc1(x))
+        # shape: (B, 4)
+        x = self.fc2(x)
+        
+        # constrain outputs to valid ranges
+        min_x = torch.sigmoid(x[:, 0])
+        min_y = torch.sigmoid(x[:, 1])
+        
+        # ensures w/h is positive and less than 1 if normalized
+        w = torch.sigmoid(x[:, 2] * (1.0 - min_x))
+        h = torch.sigmoid(x[:, 3] * (1.0 - min_y))
+        
+        x = torch.stack([min_x, min_y, w, h], dim=1)
+        return x
