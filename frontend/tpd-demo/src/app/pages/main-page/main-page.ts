@@ -1,11 +1,11 @@
-import { Component } from '@angular/core';
+import { Component, computed, signal } from '@angular/core';
 import { Navbar } from '../../components/navbar/navbar';
 import { ImportImageButton } from '../../components/import-image-button/import-image-button';
 import { ModelPredictions } from '../../components/model-predictions/model-predictions';
 import { Footer } from '../../components/footer/footer';
 import { PredictionService } from '../../services/prediction/prediction.service';
 import { Predictions } from '../../models/predictions.model';
-import { finalize } from 'rxjs';
+import { take } from 'rxjs';
 import { NgIf } from '@angular/common';
 
 @Component({
@@ -15,56 +15,52 @@ import { NgIf } from '@angular/common';
   styleUrl: './main-page.scss',
 })
 export class MainPage {
-  originalImageUrl = '';
-  predictions: Predictions | null = null;
-  isLoading = false;
-  errorMessage: string | null = null;
+  originalImageUrl = signal('');
+  private objectImageUrl: string | null = null;
+  predictions = signal<Predictions | null>(null);
+  isLoading = signal(false);
+  errorMessage = signal<string | null>(null);
+  hasUploadedImage = computed(() => !!this.originalImageUrl());
 
   constructor(private readonly predictionService: PredictionService) {}
 
-  get hasUploadedImage(): boolean {
-    return !!this.originalImageUrl;
-  }
+  onImageSelected(file: File): void {
+    this.errorMessage.set(null);
+    this.predictions.set(null);
+    this.isLoading.set(true);
 
-  async onImageSelected(file: File): Promise<void> {
-    this.errorMessage = null;
-    this.predictions = null;
-    this.isLoading = true;
-
-    try {
-      this.originalImageUrl = await this.fileToDataUrl(file);
-    } catch {
-      this.errorMessage = 'Could not read the selected image.';
-      this.isLoading = false;
-      return;
+    if (this.objectImageUrl) {
+      URL.revokeObjectURL(this.objectImageUrl);
     }
+    this.objectImageUrl = URL.createObjectURL(file);
+    this.originalImageUrl.set(this.objectImageUrl);
 
     this.predictionService
       .predict(file)
-      .pipe(finalize(() => (this.isLoading = false)))
+      .pipe(take(1))
       .subscribe({
         next: (predictions) => {
-          this.predictions = predictions;
+          this.predictions.set(predictions);
+          this.isLoading.set(false);
         },
         error: () => {
-          this.errorMessage = 'Prediction request failed. Please try another image.';
+          this.errorMessage.set(
+            'Prediction request failed. Please try another image.',
+          );
+          this.isLoading.set(false);
         },
       });
   }
 
   resetPrediction(): void {
-    this.originalImageUrl = '';
-    this.predictions = null;
-    this.errorMessage = null;
-    this.isLoading = false;
-  }
+    if (this.objectImageUrl) {
+      URL.revokeObjectURL(this.objectImageUrl);
+      this.objectImageUrl = null;
+    }
 
-  private fileToDataUrl(file: File): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result ?? ''));
-      reader.onerror = () => reject(reader.error);
-      reader.readAsDataURL(file);
-    });
+    this.originalImageUrl.set('');
+    this.predictions.set(null);
+    this.errorMessage.set(null);
+    this.isLoading.set(false);
   }
 }
