@@ -4,6 +4,6 @@ python train/end_to_end_train.py \
     --keypoint_checkpoint "exports/keypoint_best_state_dict.pt" \
     --pose_checkpoint "exports/pose_best_predicted.pt" \
     --batch_size 16 \
-    --epochs 40 \
-    --unfreeze_stage2_epoch 4 \
-    --unfreeze_stage1_epoch 8
+    --epochs 60 \
+    --unfreeze_stage2_epoch 10 \
+    --unfreeze_stage1_epoch 30
