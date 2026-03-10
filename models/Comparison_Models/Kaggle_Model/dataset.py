@@ -1,5 +1,8 @@
 # models/Comparison_Models/Kaggle_Model/dataset.py
 
+# downloads and accesses dataset from Kaggle, finds images and their paths, conversts class folder names into numeric labels,
+# splits dataset into train / val / test, wraps each split into data loader.
+
 import os
 from glob import glob # finds files by wildcard patterns
 from typing import Dict, List, Optional
@@ -153,7 +156,7 @@ class TennisImageClassDataset(Dataset):
         dataset_id: str = "orvile/tennis-player-actions-dataset",
         bs: int = 32,
         split=(0.8, 0.1, 0.1),
-        ns: int = 4,
+        num_workers: int = 4,
         seed: int = 2025,
     ):
         """
@@ -197,8 +200,8 @@ class TennisImageClassDataset(Dataset):
                       transformations=transformations, image_paths=test_X, image_labels=test_y, seed=seed)
 
         # lets dataloader load in parellel, keesp worder processes alive.
-        common = dict(num_workers=ns, persistent_workers=(ns > 0))
-        if ns > 0:
+        common = dict(num_workers=num_workers, persistent_workers=(num_workers > 0))
+        if num_workers > 0:
             common["prefetch_factor"] = 2
 
         # create dataloaders for train, val, and test

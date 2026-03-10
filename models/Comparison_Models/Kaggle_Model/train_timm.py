@@ -1,5 +1,6 @@
 # models/Comparison_Models/Kaggle_Model/train_timm.py
-# Takes training data and teaches a pretrained ResNet18 to classify tennis action, monitor validation performance and saves best version of the model and stops early if not improving.
+# Takes training data and teaches a pretrained ResNet18 to classify tennis action, 
+# monitor validation performance and saves best version of the model and stops early if not improving.
 
 import os
 from dataclasses import dataclass
@@ -7,6 +8,7 @@ from dataclasses import dataclass
 import torch
 import timm #pretrained image models.
 import torchmetrics
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 
@@ -22,10 +24,10 @@ class TrainConfig:
     dev_mode: bool = False # if true only run a couple batches/epochs, for debugging.
 
 class TrainValidation:
-    def __init__(self, classes, tr_dl, val_dl, device, cfg: TrainConfig):
+    def __init__(self, classes, training_dataloader, validation_dataloader, device, cfg: TrainConfig):
         self.classes = classes
-        self.tr_dl = tr_dl
-        self.val_dl = val_dl
+        self.training_dataloader = training_dataloader
+        self.validation_dataloader = validation_dataloader
         self.device = device
         self.cfg = cfg
 
@@ -45,6 +47,14 @@ class TrainValidation:
         self.best_f1 = -1
         self.no_improve = 0
 
+        # stores train and validation losses after each epoch so we can graph them later.
+        self.training_losses = []
+        self.validation_losses = []
+
+        # stores train and validation accuracies after each epoch so we can graph them later.
+        self.training_accuracies = []
+        self.validation_accuracies = []
+
     # helper: move batch to device.
     def _move(self, batch):
         x, y = batch
@@ -60,7 +70,7 @@ class TrainValidation:
         correct = 0
 
         # loop through training batches with progress bar.
-        for i, batch in tqdm(enumerate(self.tr_dl), total=len(self.tr_dl), desc="Training"):
+        for i, batch in tqdm(enumerate(self.training_dataloader), total=len(self.training_dataloader), desc="Training"):
             if self.cfg.dev_mode and i >= 2:
                 break
 
@@ -82,7 +92,7 @@ class TrainValidation:
             self.f1.update(logits, y)
 
         # compute average loss and accuracy over all samples and final epoch F1.
-        n = len(self.tr_dl.dataset)
+        n = len(self.training_dataloader.dataset)
         return total_loss / n, correct / n, float(self.f1.compute().item())
 
     #no_grad() disables gradient tracking, eval() eval bahvior, reset F1 agian.
@@ -95,7 +105,7 @@ class TrainValidation:
         total_loss = 0.0
         correct = 0
 
-        for i, batch in tqdm(enumerate(self.val_dl), total=len(self.val_dl), desc="Validation"):
+        for i, batch in tqdm(enumerate(self.validation_dataloader), total=len(self.validation_dataloader), desc="Validation"):
             if self.cfg.dev_mode and i >= 2:
                 break
 
@@ -107,7 +117,7 @@ class TrainValidation:
             correct += (logits.argmax(1) == y).sum().item()
             self.f1.update(logits, y)
 
-        n = len(self.val_dl.dataset)
+        n = len(self.validation_dataloader.dataset)
         return total_loss / n, correct / n, float(self.f1.compute().item())
 
     # if validation F1 improves enough update best and reset early stop counter, save model weights to disk.
@@ -130,12 +140,19 @@ class TrainValidation:
                 break
 
             print(f"\nEpoch {ep+1}/{self.cfg.epochs}")
-            tr_loss, tr_acc, tr_f1 = self.train_epoch()
-            va_loss, va_acc, va_f1 = self.val_epoch()
+            training_loss, tr_acc, tr_f1 = self.train_epoch()
+            validation_loss, va_acc, va_f1 = self.val_epoch()
 
-            print(f"Train: loss={tr_loss:.3f} acc={tr_acc:.3f} f1={tr_f1:.3f}")
-            print(f"Val:   loss={va_loss:.3f} acc={va_acc:.3f} f1={va_f1:.3f}")
+            print(f"Train: loss={training_loss:.3f} acc={tr_acc:.3f} f1={tr_f1:.3f}")
+            print(f"Val:   loss={validation_loss:.3f} acc={va_acc:.3f} f1={va_f1:.3f}")
 
+            # saves losses after each epoch so we can graph training vs validation loss.
+            self.training_losses.append(training_loss)
+            self.validation_losses.append(validation_loss)
+
+            # saves accuracies after each epoch so we can graph training vs validation accuracy.
+            self.training_accuracies.append(tr_acc)
+            self.validation_accuracies.append(va_acc)
 
             # save best checkpoint if improved, and stop training if val F1 hasn't improved for patience epochs.
             self.maybe_save(va_f1)
@@ -143,5 +160,58 @@ class TrainValidation:
             if self.no_improve >= self.cfg.patience:
                 print("Early stopping")
                 break
+
+        # makes sure output folder exists before saving graphs.
+        os.makedirs("training_outputs", exist_ok=True)
+
+        # x-axis values are the epoch numbers that actually ran.
+        epochs_ran = range(1, len(self.training_losses) + 1)
+
+        # creates training vs validation loss graph.
+        plt.figure(figsize=(7, 5))
+        plt.plot(epochs_ran, self.training_losses, marker="o", label="Training Loss")
+        plt.plot(epochs_ran, self.validation_losses, marker="o", label="Validation Loss")
+
+        # graph title, axis labels, and legend.
+        plt.title("Training vs Validation Loss")
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+        plt.legend()
+
+        # adds light grid lines to make graph easier to read.
+        plt.grid(True, linestyle="--", alpha=0.5)
+
+        # keeps layout cleaner.
+        plt.tight_layout()
+
+        # saves loss curve graph.
+        plt.savefig("training_outputs/loss_curve.png")
+        plt.close()
+
+        print("Loss curve saved to training_outputs/loss_curve.png")
+
+        # creates training vs validation accuracy graph.
+        plt.figure(figsize=(7, 5))
+        plt.plot(epochs_ran, self.training_accuracies, marker="o", label="Training Accuracy")
+        plt.plot(epochs_ran, self.validation_accuracies, marker="o", label="Validation Accuracy")
+
+        # graph title, axis labels, and legend.
+        plt.title("Training vs Validation Accuracy")
+        plt.xlabel("Epoch")
+        plt.ylabel("Accuracy")
+        plt.legend()
+
+        # adds light grid lines to make graph easier to read.
+        plt.grid(True, linestyle="--", alpha=0.5)
+
+        # keeps layout cleaner.
+        plt.tight_layout()
+
+        # saves accuracy curve graph.
+        plt.savefig("training_outputs/accuracy_curve.png")
+        plt.close()
+
+        print("Accuracy curve saved to training_outputs/accuracy_curve.png")
+
         # return trainer object.
         return self
