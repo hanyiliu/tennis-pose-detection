@@ -1,5 +1,5 @@
 python train/pose_train_predicted.py \
-     --feature_path saved_models/stage3_predicted_keypoints.pt \
+     --feature_path saved_models/stage3_predicted_attention_keypoints.pt \
      --epochs 100 \
      --batch_size 64 \
      --train_split 0.7 \

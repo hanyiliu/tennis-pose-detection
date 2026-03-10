@@ -4,14 +4,18 @@ import os
 import json
 import argparse
 from typing import List, Dict
+import sys
 
 import torch
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 
-import kagglehub
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from models.keypoint_detection import KeypointDetectionModel
+from models.keypoint_attention_detection import KeypointAttentionDetectionModel
 from preprocessing.image_preprocessing import convert_image_to_tensor
 from preprocessing.pil_preprocessing import crop_pil, letterbox_resize
 from preprocessing.tensor_preprocessing import heatmaps_to_keypoints, normalize_keypoints_xy
@@ -216,6 +220,58 @@ def build_predicted_keypoint_features(
     print("Labels shape:", tuple(all_labels.shape))
 
 
+def resolve_stage2_model_type(stage2_checkpoint: str, checkpoint_payload, requested_model_type: str) -> str:
+    if requested_model_type in {"standard", "attention"}:
+        return requested_model_type
+
+    model_type_hint = ""
+    if isinstance(checkpoint_payload, dict):
+        model_type_hint = str(checkpoint_payload.get("model_type", "")).lower()
+
+    checkpoint_name = os.path.basename(stage2_checkpoint).lower()
+    if "attention" in checkpoint_name or "attention" in model_type_hint:
+        return "attention"
+
+    return "standard"
+
+
+def resolve_save_path(save_path: str, stage2_model_type: str) -> str:
+    if save_path:
+        return save_path
+    if stage2_model_type == "attention":
+        return "saved_models/stage3_predicted_attention_keypoints.pt"
+    return "saved_models/stage3_predicted_keypoints.pt"
+
+
+def resolve_dataset_root(root_dir_arg: str = None) -> str:
+    if root_dir_arg:
+        if not os.path.isdir(root_dir_arg):
+            raise FileNotFoundError(f"Provided --root_dir does not exist: {root_dir_arg}")
+        return root_dir_arg
+
+    dataset_root_candidates = [
+        os.path.join(
+            PROJECT_ROOT,
+            "datasets",
+            "orvile",
+            "tennis-player-actions-dataset",
+            "versions",
+            "1",
+            "Tennis Player Actions Dataset for Human Pose Estimation",
+        ),
+        os.path.join(PROJECT_ROOT, "datasets", "walnut"),
+    ]
+
+    for candidate in dataset_root_candidates:
+        if os.path.isdir(candidate):
+            return candidate
+
+    raise FileNotFoundError(
+        "Could not find dataset root under repository /datasets directory. "
+        "Pass --root_dir explicitly if your dataset is elsewhere."
+    )
+
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -223,7 +279,22 @@ def main():
     parser.add_argument("--stage2_checkpoint", type=str, required=True)
 
     # where to save cached predicted keypoints for Stage 3
-    parser.add_argument("--save_path", type=str, default="saved_models/stage3_predicted_keypoints.pt")
+    parser.add_argument("--save_path", type=str, default=None)
+
+    parser.add_argument(
+        "--stage2_model_type",
+        type=str,
+        choices=["auto", "standard", "attention"],
+        default="auto",
+        help="Stage-2 architecture type. Use 'auto' to infer from checkpoint name/metadata.",
+    )
+
+    parser.add_argument(
+        "--root_dir",
+        type=str,
+        default=None,
+        help="Dataset root. Defaults to local repository /datasets candidates.",
+    )
 
     # batch size for feature building
     parser.add_argument("--batch_size", type=int, default=32)
@@ -233,15 +304,7 @@ def main():
 
     args = parser.parse_args()
 
-    # download/reuse kaggle dataset
-    root_dir = kagglehub.dataset_download("orvile/tennis-player-actions-dataset")
-
-    # kagglehub may create one extra nested folder, so step into it if needed
-    subdirs = os.listdir(root_dir)
-    if len(subdirs) == 1:
-        possible_root = os.path.join(root_dir, subdirs[0])
-        if os.path.isdir(possible_root):
-            root_dir = possible_root
+    root_dir = resolve_dataset_root(args.root_dir)
 
     print("Dataset root:", root_dir)
 
@@ -264,25 +327,39 @@ def main():
     device = get_device()
     print("Device:", device)
 
-    # load trained Stage 2 model checkpoint
-    stage2_model = KeypointDetectionModel().to(device)
-
     # load checkpoint file from disk
     checkpoint = torch.load(args.stage2_checkpoint, map_location=device)
 
-    # some files store raw state_dict directly, others wrap it in a dict under "model_state"
     if isinstance(checkpoint, dict) and "model_state" in checkpoint:
-        stage2_model.load_state_dict(checkpoint["model_state"])
+        checkpoint_state = checkpoint["model_state"]
     else:
-        stage2_model.load_state_dict(checkpoint)
+        checkpoint_state = checkpoint
+
+    if not isinstance(checkpoint_state, dict):
+        raise ValueError("Unexpected checkpoint format. Expected state_dict or dict containing model_state.")
+
+    stage2_model_type = resolve_stage2_model_type(args.stage2_checkpoint, checkpoint, args.stage2_model_type)
+
+    # load trained Stage 2 model checkpoint
+    if stage2_model_type == "attention":
+        stage2_model = KeypointAttentionDetectionModel().to(device)
+    else:
+        stage2_model = KeypointDetectionModel().to(device)
+
+    # some files store raw state_dict directly, others wrap it in a dict under "model_state"
+    stage2_model.load_state_dict(checkpoint_state)
 
     stage2_model.eval()
+
+    save_path = resolve_save_path(args.save_path, stage2_model_type)
+    print("Stage-2 model type:", stage2_model_type)
+    print("Output feature path:", save_path)
 
     build_predicted_keypoint_features(
         stage2_model=stage2_model,
         loader=loader,
         device=device,
-        save_path=args.save_path,
+        save_path=save_path,
         label_names=getattr(dataset, "label_names", None),
     )
 
