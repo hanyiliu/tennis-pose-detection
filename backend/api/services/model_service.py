@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -34,11 +35,11 @@ class ModelService:
 
         self.bbox_model = BBoxDetectionModel().to(self.device)
         self.keypoint_model = KeypointDetectionModel(num_keypoints=18).to(self.device)
-        self.pose_model = self._load_pose_model(settings.resolve_path(settings.pose_model_path))
-        self.label_names = self._load_pose_label_names(settings.resolve_path(settings.pose_model_path))
+        self.pose_model = self._load_pose_model(self._candidate_paths(settings.pose_model_path, "pose_best.pt"))
+        self.label_names = self._load_pose_label_names(self._candidate_paths(settings.pose_model_path, "pose_best.pt"))
 
-        self._load_bbox_weights(settings.resolve_path(settings.bbox_model_path))
-        self._load_keypoint_weights(settings.resolve_path(settings.keypoint_model_path))
+        self._load_bbox_weights(self._candidate_paths(settings.bbox_model_path, "bbox_best.pt"))
+        self._load_keypoint_weights(self._candidate_paths(settings.keypoint_model_path, "keypoint_best_state_dict.pt"))
 
         self.bbox_model.eval()
         self.keypoint_model.eval()
@@ -50,25 +51,66 @@ class ModelService:
             pose_detection=self.pose_model,
         )
 
-    def _load_bbox_weights(self, model_path):
-        if not model_path.exists():
-            raise FileNotFoundError(f"BBox checkpoint not found: {model_path}")
-        state = torch.load(model_path, map_location=self.device)
-        self.bbox_model.load_state_dict(state)
+    def _candidate_paths(self, preferred_path: str, fallback_name: str) -> list[Path]:
+        candidates: list[Path] = []
+        seen = set()
+        for raw_path in [preferred_path, f"checkpoints/{fallback_name}"]:
+            resolved = self.settings.resolve_path(raw_path)
+            if str(resolved) not in seen:
+                seen.add(str(resolved))
+                candidates.append(resolved)
+        return candidates
 
-    def _load_keypoint_weights(self, model_path):
-        if not model_path.exists():
-            raise FileNotFoundError(f"Keypoint checkpoint not found: {model_path}")
-        checkpoint = torch.load(model_path, map_location=self.device)
-        if isinstance(checkpoint, dict) and "model_state" in checkpoint:
-            self.keypoint_model.load_state_dict(checkpoint["model_state"])
-        else:
-            self.keypoint_model.load_state_dict(checkpoint)
+    def _load_bbox_weights(self, candidate_paths: list[Path]):
+        errors: list[str] = []
+        for model_path in candidate_paths:
+            if not model_path.exists():
+                continue
+            try:
+                state = torch.load(model_path, map_location=self.device)
+                self.bbox_model.load_state_dict(state)
+                return
+            except RuntimeError as error:
+                errors.append(f"{model_path}: {error}")
+        if errors:
+            raise RuntimeError("Unable to load a compatible bbox checkpoint. " + " | ".join(errors))
+        raise FileNotFoundError(f"BBox checkpoint not found in any candidate path: {candidate_paths}")
 
-    def _load_pose_model(self, checkpoint_path):
-        if not checkpoint_path.exists():
-            raise FileNotFoundError(f"Pose checkpoint not found: {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+    def _load_keypoint_weights(self, candidate_paths: list[Path]):
+        errors: list[str] = []
+        for model_path in candidate_paths:
+            if not model_path.exists():
+                continue
+            try:
+                checkpoint = torch.load(model_path, map_location=self.device)
+                if isinstance(checkpoint, dict) and "model_state" in checkpoint:
+                    self.keypoint_model.load_state_dict(checkpoint["model_state"])
+                else:
+                    self.keypoint_model.load_state_dict(checkpoint)
+                return
+            except RuntimeError as error:
+                errors.append(f"{model_path}: {error}")
+        if errors:
+            raise RuntimeError("Unable to load a compatible keypoint checkpoint. " + " | ".join(errors))
+        raise FileNotFoundError(f"Keypoint checkpoint not found in any candidate path: {candidate_paths}")
+
+    def _load_pose_model(self, candidate_paths: list[Path]):
+        checkpoint = None
+        load_errors: list[str] = []
+        for checkpoint_path in candidate_paths:
+            if not checkpoint_path.exists():
+                continue
+            try:
+                checkpoint = torch.load(checkpoint_path, map_location=self.device)
+                break
+            except RuntimeError as error:
+                load_errors.append(f"{checkpoint_path}: {error}")
+
+        if checkpoint is None:
+            if load_errors:
+                raise RuntimeError("Unable to load a compatible pose checkpoint. " + " | ".join(load_errors))
+            raise FileNotFoundError(f"Pose checkpoint not found in any candidate path: {candidate_paths}")
+
         args = checkpoint.get("args", {})
         model = PoseClassificationModel(
             num_keypoints=18,
@@ -80,11 +122,14 @@ class ModelService:
         model.load_state_dict(checkpoint["model_state"])
         return model
 
-    def _load_pose_label_names(self, checkpoint_path):
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
-        label_names = checkpoint.get("label_names")
-        if isinstance(label_names, list) and len(label_names) == 4:
-            return [_normalize_label(label) for label in label_names]
+    def _load_pose_label_names(self, candidate_paths: list[Path]):
+        for checkpoint_path in candidate_paths:
+            if not checkpoint_path.exists():
+                continue
+            checkpoint = torch.load(checkpoint_path, map_location="cpu")
+            label_names = checkpoint.get("label_names")
+            if isinstance(label_names, list) and len(label_names) == 4:
+                return [_normalize_label(label) for label in label_names]
         return POSE_KEYS
 
     @torch.no_grad()

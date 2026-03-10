@@ -2,7 +2,6 @@ from functools import lru_cache
 from pathlib import Path
 
 import torch
-from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,18 +25,15 @@ class Settings(BaseSettings):
 
     device: str = _default_device()
     max_upload_mb: int = 10
-    cors_origins: list[str] = ["http://localhost:4200"]
-
-    @field_validator("cors_origins", mode="before")
-    @classmethod
-    def parse_cors_origins(cls, value):
-        if isinstance(value, str):
-            return [part.strip() for part in value.split(",") if part.strip()]
-        return value
+    cors_origins: str = "http://localhost:4200"
 
     @property
     def project_root(self) -> Path:
         return Path(__file__).resolve().parents[3]
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        return [part.strip() for part in self.cors_origins.split(",") if part.strip()]
 
     def resolve_path(self, relative_or_abs_path: str) -> Path:
         path = Path(relative_or_abs_path)
