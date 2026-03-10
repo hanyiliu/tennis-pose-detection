@@ -57,4 +57,7 @@ Model predictions:
     - serve_conf: number
     - class_prediction_bar_graph: image (Bar graph of class prediction confidences)
 
+- Final Prediction
+    - overlayed_image: image (Overlayed image with bounding box, keypoints, and final class prediction)
+
 These predictions map directly to `tpd-demo`'s Prediction model.
