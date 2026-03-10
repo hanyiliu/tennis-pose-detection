@@ -1,6 +1,6 @@
 from torchvision import transforms
 
-def get_train_transforms(img_size=224):
+def get_train_transforms(img_size=256):
     return transforms.Compose([
         transforms.Resize((img_size, img_size)),
         transforms.RandomHorizontalFlip(p=0.5),
@@ -13,7 +13,7 @@ def get_train_transforms(img_size=224):
         )
     ])
 
-def get_eval_transforms(img_size=224):
+def get_eval_transforms(img_size=256):
     return transforms.Compose([
         transforms.Resize((img_size, img_size)),
         transforms.ToTensor(),

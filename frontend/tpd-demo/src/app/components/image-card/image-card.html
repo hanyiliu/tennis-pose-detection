@@ -1,0 +1,4 @@
+<div class="image-card">
+	<img *ngIf="src" [src]="src" [alt]="alt" />
+	<div *ngIf="!src" class="empty-state">Image unavailable</div>
+</div>

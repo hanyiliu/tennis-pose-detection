@@ -1,0 +1,24 @@
+<section class="prediction-section">
+	<app-section-header
+		mainTitle="Model Prediction"
+		subTitle="Final Output"
+		[showToggle]="false"
+	/>
+
+	<div class="image-grid">
+		<div class="column">
+			<p class="column-title">Original Image</p>
+			<app-image-card
+				[src]="originalImageUrl"
+				alt="Original uploaded image"
+			/>
+		</div>
+		<div class="column">
+			<p class="column-title">Overlayed Prediction</p>
+			<app-image-card
+				[src]="overlayImageUrl"
+				alt="Model prediction overlay image"
+			/>
+		</div>
+	</div>
+</section>

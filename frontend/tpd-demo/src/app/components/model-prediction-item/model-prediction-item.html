@@ -1,0 +1,31 @@
+<section class="prediction-item">
+	<app-section-header
+		[mainTitle]="mainTitle"
+		[subTitle]="subTitle"
+		[showToggle]="true"
+		[expanded]="expanded"
+		(toggleSection)="toggleExpanded()"
+	/>
+
+	<div
+		class="content"
+		[@expandCollapse]="expanded ? 'expanded' : 'collapsed'"
+	>
+		<div
+			class="values-column"
+			[style.grid-template-columns]="'repeat(' + valuesColumnCount + ', minmax(0, 1fr))'"
+		>
+			<div class="value-row" *ngFor="let entry of values">
+				<span class="label">{{ entry.label }}:</span>
+				<span class="value">{{ entry.value }}</span>
+			</div>
+		</div>
+
+		<div class="images-column">
+			<div class="image-item" *ngFor="let image of images">
+				<p class="image-title">{{ image.label }}</p>
+				<app-image-card [src]="image.src" [alt]="image.label" />
+			</div>
+		</div>
+	</div>
+</section>

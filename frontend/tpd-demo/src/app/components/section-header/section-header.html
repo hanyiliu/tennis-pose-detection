@@ -1,0 +1,14 @@
+<div class="section-header">
+	<div class="main-title">{{ mainTitle }}</div>
+	<div class="right-group">
+		<div class="sub-title">{{ subTitle }}</div>
+		<button
+			*ngIf="showToggle"
+			mat-button
+			class="toggle-button"
+			(click)="toggleSection.emit()"
+		>
+			{{ expanded ? 'Collapse ▲' : 'Expand ▼' }}
+		</button>
+	</div>
+</div>

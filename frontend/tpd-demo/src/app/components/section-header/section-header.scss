@@ -1,0 +1,26 @@
+.section-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	gap: 16px;
+	padding: 12px 0;
+	border-bottom: 1px solid var(--tpd-secondary);
+}
+
+.main-title,
+.sub-title {
+	font-size: 1.05rem;
+	font-weight: 700;
+	color: var(--tpd-primary);
+}
+
+.right-group {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+}
+
+.toggle-button {
+	color: var(--tpd-primary);
+	border-radius: 8px;
+}
