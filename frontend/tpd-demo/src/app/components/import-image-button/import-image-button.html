@@ -1,1 +1,12 @@
-<p>import-image-button works!</p>
+<div class="upload-container">
+	<input
+		#fileInput
+		type="file"
+		accept="image/*"
+		(change)="onFileInputChange($event)"
+		hidden
+	/>
+	<button mat-raised-button class="upload-button" (click)="fileInput.click()">
+		Upload Image
+	</button>
+</div>

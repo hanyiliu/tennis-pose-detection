@@ -1,1 +1,9 @@
-<p>navbar works!</p>
+<mat-toolbar class="navbar">
+	<div class="left">Tennis Pose Detection</div>
+	<div class="right" *ngIf="showSections">
+		<span>Prediction</span>
+		<span>Stage One</span>
+		<span>Stage Two</span>
+		<span>Stage Three</span>
+	</div>
+</mat-toolbar>

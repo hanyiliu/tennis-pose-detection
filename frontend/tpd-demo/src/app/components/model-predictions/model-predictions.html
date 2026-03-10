@@ -1,1 +1,38 @@
-<p>model-predictions works!</p>
+<section class="predictions-wrapper">
+	<app-back-button (makeAnotherPrediction)="makeAnotherPrediction.emit()" />
+
+	<div class="loading" *ngIf="isLoading">
+		<mat-spinner diameter="40" />
+		<p>Running model prediction...</p>
+	</div>
+
+	<div class="error" *ngIf="!isLoading && errorMessage">{{ errorMessage }}</div>
+
+	<ng-container *ngIf="!isLoading && predictions">
+		<app-model-final-prediction
+			[originalImageUrl]="originalImageUrl"
+			[overlayImageUrl]="predictions.model_prediction_overlay_image_url"
+		/>
+
+		<app-model-prediction-item
+			mainTitle="Stage 1"
+			subTitle="Bounding Box Detection"
+			[values]="stageOneValues"
+			[images]="stageOneImages"
+		/>
+
+		<app-model-prediction-item
+			mainTitle="Stage 2"
+			subTitle="Keypoint Detection"
+			[values]="stageTwoValues"
+			[images]="stageTwoImages"
+		/>
+
+		<app-model-prediction-item
+			mainTitle="Stage 3"
+			subTitle="Pose Classification"
+			[values]="stageThreeValues"
+			[images]="stageThreeImages"
+		/>
+	</ng-container>
+</section>

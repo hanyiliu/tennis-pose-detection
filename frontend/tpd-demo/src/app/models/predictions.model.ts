@@ -1,3 +1,31 @@
+export interface PredictionResponse {
+    bbox_x: number;
+    bbox_y: number;
+    bbox_width: number;
+    bbox_height: number;
+
+    cropped_bbox_image?: string;
+    cropped_bbox_image_url?: string;
+
+    keypoint_positions: number[][];
+    keypoint_aggregated_heatmap?: string;
+    keypoint_aggregated_heatmap_url?: string;
+    keypoint_cropped_image?: string;
+    keypoint_cropped_image_url?: string;
+
+    backhand_conf: number;
+    forehand_conf: number;
+    ready_position_conf: number;
+    serve_conf: number;
+    class_prediction_bar_graph?: string;
+    class_prediction_bar_graph_url?: string;
+
+    model_prediction_overlay_image?: string;
+    model_prediction_overlay_image_url?: string;
+    overlayed_image?: string;
+    overlayed_image_url?: string;
+}
+
 export interface Predictions {
     // Stage One
     bbox_x: number;
@@ -18,4 +46,5 @@ export interface Predictions {
     serve_conf: number;
     class_prediction_bar_graph_url: string; // URL to bar graph of class prediction confidences
 
+    model_prediction_overlay_image_url: string;
 }

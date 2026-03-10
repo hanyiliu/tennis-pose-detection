@@ -1,0 +1,50 @@
+.prediction-item {
+	background: white;
+	border: 1px solid var(--tpd-secondary);
+	border-radius: 16px;
+	padding: 16px;
+}
+
+.content {
+	display: grid;
+	grid-template-columns: 1.1fr 1fr;
+	gap: 20px;
+}
+
+.values-column {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.value-row {
+	background: rgba(175, 176, 222, 0.14);
+	border: 1px solid rgba(175, 176, 222, 0.5);
+	border-radius: 10px;
+	padding: 10px 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.label {
+	font-weight: 600;
+	color: var(--tpd-primary);
+}
+
+.value {
+	font-size: 0.94rem;
+	color: #212121;
+}
+
+.images-column {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.image-title {
+	margin: 0 0 6px;
+	font-weight: 600;
+	color: var(--tpd-primary);
+}
