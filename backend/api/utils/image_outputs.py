@@ -3,7 +3,16 @@ from io import BytesIO
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
+
+
+def _load_label_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    for font_name in ["DejaVuSans.ttf", "Arial.ttf"]:
+        try:
+            return ImageFont.truetype(font_name, size=size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
 
 
 def _figure_to_pil(fig) -> Image.Image:
@@ -105,12 +114,37 @@ def create_final_overlay_image(
     prediction_label: str,
     confidence: float,
 ) -> Image.Image:
-    canvas = image.copy()
+    canvas = image.copy().convert("RGBA")
     draw = ImageDraw.Draw(canvas)
     x1, y1, x2, y2 = bbox_xyxy
 
     draw.rectangle((x1, y1, x2, y2), outline=(255, 0, 0), width=3)
-    draw.text((x1, max(y1 - 20, 0)), f"{prediction_label}: {confidence:.2f}", fill=(255, 255, 0))
+
+    label_text = prediction_label.replace("_", " ").title()
+    confidence_text = f"Confidence: {confidence:.2f}"
+    text = f"{label_text} | {confidence_text}"
+
+    text_x = 12
+    text_h = 72
+    text_w = max(660, (len(text) * 24) + 60)
+    text_y = max(canvas.height - text_h - 12, 0)
+    text_x2 = min(text_x + text_w, canvas.width - 12)
+
+    overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+    overlay_draw.rectangle(
+        (text_x, text_y, text_x2, text_y + text_h),
+        fill=(0, 0, 0, 140),
+    )
+    canvas = Image.alpha_composite(canvas, overlay)
+    draw = ImageDraw.Draw(canvas)
+    label_font = _load_label_font(size=36)
+    draw.text(
+        (text_x + 20, text_y + 18),
+        text,
+        fill=(255, 255, 255, 255),
+        font=label_font,
+    )
 
     points = keypoints_xyv.detach().cpu().numpy()
     for x_letterbox, y_letterbox, visibility in points:
@@ -127,4 +161,4 @@ def create_final_overlay_image(
         radius = 3
         draw.ellipse((px - radius, py - radius, px + radius, py + radius), fill=(0, 255, 0))
 
-    return canvas
+    return canvas.convert("RGB")
