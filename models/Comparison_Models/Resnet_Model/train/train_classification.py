@@ -79,9 +79,9 @@ def plot_training_curve(train_losses, val_losses, train_accs, val_accs):
     
 
 def main():
-    img_size = 224
+    img_size = 256
     batch_size = 32
-    num_epochs = 15
+    num_epochs = 50
     lr = 1e-4
     weight_decay = 1e-4
     checkpoint_path = "best_model.pt"
@@ -104,7 +104,7 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=2)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=2)
 
-    model = TennisPoseClassifier(num_classes=4, pretrained=True).to(device)
+    model = TennisPoseClassifier().to(device)
 
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
