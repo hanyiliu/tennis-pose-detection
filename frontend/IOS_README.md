@@ -1,4 +1,4 @@
-# Frontend Deployment of Tennis Pose Detection Model
+# iOS Frontend Deployment of Tennis Pose Detection Model
 
 ## Overview
 This deployment will be done to an iOS device using SwiftUI. The application will be primarily a Live Camera View, where inflowing frames are passed to the TPD model in real-time, with overlay of bounding boxes, keypoint frames, and final class prediction + confidence all toggleable in the app. 
