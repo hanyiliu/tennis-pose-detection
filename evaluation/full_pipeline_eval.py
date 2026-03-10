@@ -173,7 +173,17 @@ def load_pose_model(checkpoint_path: str, device):
         visibility_threshold=visibility_threshold,
     ).to(device)
 
-    model.load_state_dict(checkpoint["model_state"])
+    if "model_state" in checkpoint:
+        pose_state = checkpoint["model_state"]
+    elif "pose_model_state" in checkpoint:
+        pose_state = checkpoint["pose_model_state"]
+    else:
+        raise ValueError(
+            f"Unexpected pose checkpoint format for {checkpoint_path}. "
+            "Expected 'model_state' or 'pose_model_state'."
+        )
+
+    model.load_state_dict(pose_state)
     model.eval()
 
     label_names = checkpoint.get("label_names", None)
@@ -324,7 +334,7 @@ def main():
     # checkpoint paths
     bbox_checkpoint_path = "checkpoints/bbox_best.pt"
     keypoint_checkpoint_path = "exports/keypoint_best_state_dict.pt"
-    pose_checkpoint_path = "checkpoints/pose_best_predicted.pt"
+    pose_checkpoint_path = "exports/e2e_best.pt"
 
     # output folder
     output_dir = "evaluation_outputs"
