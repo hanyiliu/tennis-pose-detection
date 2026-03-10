@@ -1,0 +1,19 @@
+.prediction-section {
+	background: white;
+	border: 1px solid var(--tpd-secondary);
+	border-radius: 16px;
+	padding: 16px;
+}
+
+.image-grid {
+	margin-top: 16px;
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 18px;
+}
+
+.column-title {
+	margin: 0 0 8px;
+	font-weight: 600;
+	color: var(--tpd-primary);
+}

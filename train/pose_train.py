@@ -13,6 +13,9 @@ from torch.utils.data import DataLoader, random_split
 from data.pose_dataset import tennis_pose_dataset 
 from models.pose_classification import PoseClassificationModel
 
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix, classification_report, ConfusionMatrixDisplay
+
 
 # do we need this???
 def get_device(): # checks if we have access to a GPU (NVIDIA or Apple Silicon) and returns the appropriate device for PyTorch computations. If no GPU is available, it falls back to CPU.
@@ -69,6 +72,54 @@ def evaluate(model, loader, device):
         correct += (logits.argmax(dim=1) == label).sum().item() # compute number of correct predictions in this batch and accumulate
 
     return total_loss / max(total, 1), correct / max(total, 1) # return average loss and accuracy over the whole dataset
+
+@torch.no_grad()
+def evaluate_with_confusion_matrix(model, loader, device, label_names=None, save_path="evaluation_outputs/stage3_confusion_matrix.png"):
+    """
+    Evaluate Stage 3 on the given loader and create a confusion matrix.
+
+    Args:
+        model: trained pose classification model
+        loader: DataLoader for evaluation
+        device: cuda / mps / cpu
+        label_names: optional list of class names
+        save_path: where to save confusion matrix image
+    """
+    model.eval()
+
+    all_preds = []
+    all_labels = []
+
+    for keypoints, label in loader:
+        keypoints = keypoints.to(device)
+        label = label.to(device)
+
+        logits = model(keypoints, return_logits=True)
+        preds = torch.argmax(logits, dim=1)
+
+        all_preds.extend(preds.cpu().numpy().tolist())
+        all_labels.extend(label.cpu().numpy().tolist())
+
+    cm = confusion_matrix(all_labels, all_preds)
+
+    print("\n===== STAGE 3 TEST CLASSIFICATION REPORT =====")
+    if label_names is not None:
+        print(classification_report(all_labels, all_preds, target_names=label_names, digits=4))
+    else:
+        print(classification_report(all_labels, all_preds, digits=4))
+
+    os.makedirs("evaluation_outputs", exist_ok=True)
+
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=label_names)
+    fig, ax = plt.subplots(figsize=(8, 6))
+    disp.plot(ax=ax, cmap="Blues", values_format="d", colorbar=False)
+    plt.title("Stage 3 Confusion Matrix (Ground Truth Keypoints)")
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=200)
+    plt.close()
+
+    print(f"Saved confusion matrix to: {save_path}")
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -229,8 +280,18 @@ def main():
     # evaluates on test set
     test_loss, test_acc = evaluate(model, test_loader, device)
     print(f"Test loss: {test_loss:.4f} acc {test_acc:.4f}")
-    if checkpoint.get("label_names") is not None:
-        print("Labels:", checkpoint["label_names"])
+
+    label_names = checkpoint.get("label_names", None)
+    if label_names is not None:
+        print("Labels:", label_names)
+
+    evaluate_with_confusion_matrix(
+        model=model,
+        loader=test_loader,
+        device=device,
+        label_names=label_names,
+        save_path="evaluation_outputs/stage3_confusion_matrix.png",
+    )
         
 if __name__ == "__main__":
     main()

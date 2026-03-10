@@ -42,11 +42,24 @@ class PoseClassificationModel(nn.Module):
         self.num_classes = num_classes
         self.visibility_threshold = visibility_threshold
 
-        in_dim = num_keypoints * 3  # 54, first linear layer needs a fixed input dimension, which is num_keypoints * 3 (x,y,visibility for each keypoint)
+        raw_dim = num_keypoints * 3  # 54 = 18 * (x,y,visibility)
 
-        self.fc1 = nn.Linear(in_dim, hidden_dim) # fully connected layer that takes in flattened keypoints and outputs hidden_dim features
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim) # another fully connected layer that takes in hidden_dim features and outputs hidden_dim features (allows for more complex representations)
-        self.out = nn.Linear(hidden_dim, num_classes) # final output layer that takes in hidden_dim features and outputs num_classes logits for classification
+        # visibility-weighted x,y features contribute num_keypoints * 2 features
+        weighted_dim = num_keypoints * 2  # 36 = 18 * (x,y) after multiplying by visibility
+
+        # centered x,y features contribute num_keypoints * 2 features
+        centered_dim = num_keypoints * 2  # 36 = 18 * (x,y) after subtracting body center
+
+        # global pose spread features = [min_x, min_y, spread_x, spread_y]
+        global_dim = 4
+
+        # final feature dimension combines raw keypoints + weighted coordinates + centered coordinates + global spread
+        in_dim = raw_dim + weighted_dim + centered_dim + global_dim  # 54 + 36 + 36 + 4 = 130
+
+        self.fc1 = nn.Linear(in_dim, hidden_dim)  # fully connected layer that takes in engineered pose features and outputs hidden_dim features
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)  # another fully connected layer that takes in hidden_dim features and outputs hidden_dim features (allows for more complex representations)
+        self.fc3 = nn.Linear(hidden_dim, hidden_dim // 2)  # compress representation slightly before final output layer
+        self.out = nn.Linear(hidden_dim // 2, num_classes)  # final output layer that takes in hidden_dim//2 features and outputs num_classes logits for classification
         self.drop = nn.Dropout(dropout)
 
     def _apply_visibility_mask(self, keypoints: torch.Tensor) -> torch.Tensor:
@@ -58,13 +71,56 @@ class PoseClassificationModel(nn.Module):
         if self.visibility_threshold <= 0: # if threshold is 0 or negative, we don't apply any masking and just return the original keypoints.
             return keypoints
 
-        xy = keypoints[..., 0:2]          # (B,18,2)
-        vis = keypoints[..., 2:3]         # (B,18,1)
+        xy = keypoints[..., 0:2]    # (B,18,2)
+        vis = keypoints[..., 2:3]   # (B,18,1)
         mask = (vis >= self.visibility_threshold).float() # (B,18,1), 1 where visibility is above threshold, 0 where it's below. This mask will be used to zero out low-visibility keypoints.
 
         xy = xy * mask # zero out x and y where visibility is below threshold
         vis = vis * mask # zero out visibility where it's below threshold (not strictly necessary since vis is already below threshold, but keeps the output consistent)
         return torch.cat([xy, vis], dim=-1) # (B,18,3), with low-visibility keypoints zeroed out
+
+    def _build_pose_features(self, keypoints: torch.Tensor) -> torch.Tensor:
+        """
+        Build a richer pose feature vector before feeding into the classifier.
+
+        Uses:
+            1) raw normalized keypoints [x, y, vis]
+            2) visibility-weighted x,y coordinates
+            3) body-centered x,y coordinates
+            4) simple global pose spread features
+
+        This helps the classifier focus more on reliable joints and relative pose geometry
+        instead of only absolute position.
+        """
+        xy = keypoints[..., 0:2]   # (B,18,2), raw x and y coordinates
+        vis = keypoints[..., 2:3]  # (B,18,1), visibility / confidence values
+
+        # visibility-weighted coordinates reduce the impact of unreliable joints
+        weighted_xy = xy * vis  # (B,18,2), low-confidence joints contribute less to the final feature vector
+
+        # compute visibility-weighted body center so highly visible joints influence the center more
+        vis_sum = vis.sum(dim=1, keepdim=True).clamp_min(1e-6)  # (B,1,1), clamp prevents division by zero if all joints are invisible
+        center = (xy * vis).sum(dim=1, keepdim=True) / vis_sum  # (B,1,2), weighted center of the visible joints
+
+        # subtract body center from each x,y so the pose becomes more relative and less sensitive to crop shifts
+        centered_xy = xy - center  # (B,18,2)
+
+        # compute rough pose extent using only visible joints
+        big = torch.full_like(xy, 1e6)     # large placeholder used when masking invisible joints for min
+        small = torch.full_like(xy, -1e6)  # small placeholder used when masking invisible joints for max
+
+        masked_min_xy = torch.where(vis > 0, xy, big).amin(dim=1)   # (B,2), minimum visible x,y
+        masked_max_xy = torch.where(vis > 0, xy, small).amax(dim=1) # (B,2), maximum visible x,y
+
+        spread = masked_max_xy - masked_min_xy  # (B,2), width/height spread of the visible pose
+        global_feats = torch.cat([masked_min_xy, spread], dim=-1)   # (B,4), [min_x, min_y, spread_x, spread_y]
+
+        raw_flat = keypoints.reshape(keypoints.size(0), -1)           # (B,54), flatten original keypoints
+        weighted_flat = weighted_xy.reshape(keypoints.size(0), -1)    # (B,36), flatten visibility-weighted x,y
+        centered_flat = centered_xy.reshape(keypoints.size(0), -1)    # (B,36), flatten centered x,y
+
+        features = torch.cat([raw_flat, weighted_flat, centered_flat, global_feats], dim=-1)  # final engineered feature vector
+        return features
 
     def forward(self, keypoints: torch.Tensor, return_logits: bool = False) -> torch.Tensor: # strict shape check.
         # Accept single sample (18,3)
@@ -79,13 +135,15 @@ class PoseClassificationModel(nn.Module):
 
         keypoints = self._apply_visibility_mask(keypoints) # zero out low-visibility keypoints if visibility_threshold > 0, otherwise returns original keypoints unchanged.
 
-        x = keypoints.reshape(keypoints.size(0), -1)  # (B,54), flatten keypoints into shape (B, num_keypoints*3) to be input into fully connected layers. Each sample in the batch is now represented as a 54-dimensional vector containing the x,y,visibility for each of the 18 keypoints.
+        x = self._build_pose_features(keypoints)  # (B,94), build richer pose features instead of only flattening raw keypoints
 
-        x = torch.relu(self.fc1(x))        # (B,hidden_dim), pass through first fully connected layer and apply ReLU activation to introduce non-linearity. The model will learn more complex representations of the keypoint data.
-        x = self.drop(x)               # apply dropout for regularization, randomly zeroing out some of the features to prevent overfitting and encourage the model to learn more robust features that generalize better to unseen data.
-        x = torch.relu(self.fc2(x))        # (B,hidden_dim), pass through second fully connected layer and apply ReLU activation again for more complex representations.
-        x = self.drop(x)               # apply dropout again for regularization before the final output layer.      
-        logits = self.out(x)  # (B,4)
+        x = torch.relu(self.fc1(x)) # (B,hidden_dim), pass through first fully connected layer and apply ReLU activation to introduce non-linearity. The model will learn more complex representations of the pose feature vector.
+        x = self.drop(x) # apply dropout for regularization, randomly zeroing out some of the features to prevent overfitting and encourage the model to learn more robust features that generalize better to unseen data.
+        x = torch.relu(self.fc2(x)) # (B,hidden_dim), pass through second fully connected layer and apply ReLU activation again for more complex representations.
+        x = self.drop(x) # apply dropout again for regularization before the next layer.
+        x = torch.relu(self.fc3(x)) # (B,hidden_dim//2), compress learned representation before final output layer
+        x = self.drop(x) # apply dropout one more time before classification
+        logits = self.out(x) # (B,4)
 
         if return_logits: # if the caller wants the raw logits (e.g. for use with a loss function like CrossEntropyLoss that expects logits), return them directly without applying softmax.
             return logits 

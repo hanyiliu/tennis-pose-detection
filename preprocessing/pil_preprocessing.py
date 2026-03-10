@@ -20,10 +20,13 @@ def norm_bbox_to_xyxy_pixels(bbox_pred, image_width, image_height):
         raise ValueError(f"Expected bbox prediction with 4 values, got shape {tuple(bbox_pred.shape)}")
 
     x, y, w, h = bbox.tolist()
-    x = x * image_width
-    y = y * image_height
-    w = w * image_width
-    h = h * image_height
+
+    likely_normalized = max(abs(x), abs(y), abs(w), abs(h)) <= 1.5
+    if likely_normalized:
+        x = x * image_width
+        y = y * image_height
+        w = w * image_width
+        h = h * image_height
 
     x1 = int(round(x))
     y1 = int(round(y))

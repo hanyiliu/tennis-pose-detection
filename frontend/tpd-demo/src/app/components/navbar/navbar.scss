@@ -1,0 +1,21 @@
+.navbar {
+	background: var(--tpd-primary);
+	color: white;
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	height: 72px;
+	padding: 0 32px;
+}
+
+.left {
+	font-size: 1.2rem;
+	font-weight: 700;
+}
+
+.right {
+	display: flex;
+	gap: 28px;
+	font-size: 0.95rem;
+	font-weight: 500;
+}

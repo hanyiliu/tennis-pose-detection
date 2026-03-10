@@ -1,0 +1,14 @@
+.upload-container {
+	display: flex;
+	justify-content: center;
+	align-items: center;
+	width: 100%;
+}
+
+.upload-button {
+	background-color: var(--tpd-primary);
+	color: white;
+	padding: 28px 34px;
+	font-size: 1.05rem;
+	border-radius: 16px;
+}
