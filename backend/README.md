@@ -17,7 +17,7 @@ We use FastAPI here to link communication between frontend demo and backend mode
 
     - Stage Three
         - backhand_conf: number
-        - forehand_conf: numbe
+        - forehand_conf: number
         - ready_position_conf: number
         - serve_conf: number
         - class_prediction_bar_graph: image (Bar graph of class prediction confidences)
@@ -26,5 +26,15 @@ We use FastAPI here to link communication between frontend demo and backend mode
         - overlayed_image: image (Overlayed image with bounding box, keypoints, and final class prediction)
     - These predictions map directly to `tpd-demo`'s Prediction model. 
 
-All the images and graphs to be returned here has all already been implemented in `notebooks/training`. To find the corresponding logic for each images, they each belong in their own stage's notebook. Copy that logic to here to use for generation of images.
+All image fields returned by `/predict` are Data URL strings (`data:image/png;base64,...`).
+
+## Local Run
+
+From repo root:
+
+1. `pip install -r backend/requirements.txt`
+2. `cp backend/.env.example backend/.env`
+3. `uvicorn backend.api.main:app --reload --port 8000`
+
+Then send a POST request to `/predict` with raw image bytes as the request body.
 
