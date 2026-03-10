@@ -18,6 +18,10 @@ import kagglehub
 from torch.utils.data import Subset
 from torchvision.ops import complete_box_iou_loss
 
+import random
+import numpy as np
+import matplotlib.pyplot as plt
+
 if os.path.basename(os.getcwd()) == "eda":
     os.chdir("..")
 
@@ -30,6 +34,15 @@ path = os.path.join(
     path,
     "Tennis Player Actions Dataset for Human Pose Estimation"
 )
+
+def set_seed(seed: int = 42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
 
 # checking which GPU we're using (NVIDIA vs Apple vs other)
 def get_device():
@@ -157,6 +170,75 @@ def iou_evaluate(model, loader, criterion, device, iou_thresholds=(0.5, 0.75)):
     acc = {thr: correct[thr] / max(n, 1) for thr in iou_thresholds}
     return avg_loss, mean_iou, acc
 
+def evaluate_detection_metrics(model, dataset_for_model, device):
+    """
+    Evaluates:
+      - mean IoU
+      - mean L1 error
+      - AP@0.50
+      - mAP@0.50:0.95
+      - AP by threshold
+    dataset_for_model should return (img_tensor, gt_bbox_norm)
+    """
+    model.eval()
+
+    ious = []
+    l1_errors = []
+
+    for i in range(len(dataset_for_model)):
+        img_tensor_i, gt_bbox_norm_i = dataset_for_model[i]
+
+        pred_bbox_norm_i = model(img_tensor_i.unsqueeze(0).to(device))[0].detach().cpu().numpy()
+        pred_bbox_norm_i = np.clip(pred_bbox_norm_i, 0.0, 1.0)
+
+        gt_bbox_norm_i = gt_bbox_norm_i.numpy()
+
+        iou_i = bbox_iou_xyxy(gt_bbox_norm_i, pred_bbox_norm_i)
+        l1_i = float(np.mean(np.abs(pred_bbox_norm_i - gt_bbox_norm_i)))
+
+        ious.append(iou_i)
+        l1_errors.append(l1_i)
+
+    ious = np.array(ious, dtype=np.float32)
+    l1_errors = np.array(l1_errors, dtype=np.float32)
+
+    iou_thresholds = np.arange(0.50, 0.96, 0.05)
+    ap_by_threshold = {float(t): float(np.mean(ious >= t)) for t in iou_thresholds}
+
+    map_50 = ap_by_threshold[0.5]
+    map_50_95 = float(np.mean(list(ap_by_threshold.values())))
+
+    return {
+        "num_samples": len(ious),
+        "mean_iou": float(np.mean(ious)),
+        "mean_l1": float(np.mean(l1_errors)),
+        "ap_50": map_50,
+        "map_50_95": map_50_95,
+        "ap_by_threshold": ap_by_threshold,
+    }
+
+def plot_training_curve(train_losses, val_losses, train_accs, val_accs):
+    epochs = range(1, len(train_losses) + 1)
+    plt.figure(figsize=(8,5))
+    plt.plot(epochs, train_losses, label="Train Loss")
+    plt.plot(epochs, val_losses, label="Validation Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Training and Validation Loss")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+    
+    plt.figure(figsize=(8,5))
+    plt.plot(epochs, train_accs, label="Train Accuracy")
+    plt.plot(epochs, val_accs, label="Validation Accuracy")
+    plt.xlabel("Epoch")
+    plt.ylabel("Accuracy")
+    plt.title("Training and Validation Accuracy")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
 def main():
     parser = argparse.ArgumentParser()
     # where the dataset folder is
@@ -198,24 +280,24 @@ def main():
     ])
     
     train_dataset = TennisBBoxDataset(args.root_dir, annotation_files, transform=train_transform)
-    eval_dataset  = TennisBBoxDataset(args.root_dir, annotation_files, transform=eval_transform)
+    eval_dataset = TennisBBoxDataset(args.root_dir, annotation_files, transform=eval_transform)
 
     dataset_size = len(train_dataset)
     train_size = int(dataset_size * args.train_split)
-    val_size   = int(dataset_size * args.val_split)
-    test_size  = dataset_size - train_size - val_size
+    val_size = int(dataset_size * args.val_split)
+    test_size = dataset_size - train_size - val_size
 
     # split indices, not dataset objects, for reproducibility
     g = torch.Generator().manual_seed(args.seed)
     perm = torch.randperm(dataset_size, generator=g).tolist()
 
     train_idx = perm[:train_size]
-    val_idx   = perm[train_size:train_size + val_size]
-    test_idx  = perm[train_size + val_size:]
+    val_idx = perm[train_size:train_size + val_size]
+    test_idx = perm[train_size + val_size:]
 
     train_ds = Subset(train_dataset, train_idx)
-    val_ds   = Subset(eval_dataset,  val_idx)
-    test_ds  = Subset(eval_dataset,  test_idx)
+    val_ds = Subset(eval_dataset, val_idx)
+    test_ds = Subset(eval_dataset, test_idx)
     
     # DataLoader does:
     # batching- returns batches instead of single samples
@@ -251,11 +333,17 @@ def main():
     best_val_mean_iou = -1.0
     os.makedirs("checkpoints", exist_ok=True)
     
+    train_losses = []
+    train_accs = []
+    val_losses = []
+    val_accs = []
     
     for epoch in range(1, args.epochs + 1):
         model.train()
         total_loss = 0.0
         n = 0
+        train_correct_50 = 0
+        train_sum_iou = 0.0
         
         for imgs, bboxes in train_loader:
             imgs = imgs.to(device)
@@ -276,12 +364,25 @@ def main():
             total_loss += loss.item() * bs
             n += bs
             
+            with torch.no_grad():
+                preds_clamped = preds.clamp(0,1)
+                bboxes_clamped = bboxes.clamp(0,1)
+                preds_xyxy = sanitize_xyxy(xywh_to_xyxy(preds_clamped))
+                bboxes_xyxy = sanitize_xyxy(xywh_to_xyxy(bboxes_clamped))
+                ious = bbox_iou_xyxy(preds_xyxy, bboxes_xyxy)
+            
         # average loss over all training samples for this epoch
         train_loss = total_loss / max(n, 1)
+        train_acc_50 = train_correct_50 / max(n, 1)
         # runs model on validation set
         val_loss, val_mean_iou, val_acc = iou_evaluate(model, val_loader, criterion, device)
 
         scheduler.step(val_loss)
+        
+        train_losses.append(train_loss)
+        train_accs.append(train_acc_50)
+        val_losses.append(val_loss)
+        val_accs.append(val_acc[0.5])
 
         print(f"Epoch {epoch:02d}/{args.epochs}  train_loss: {train_loss:.5f}  val_loss: {val_loss:.5f}  val_acc@0.50: {val_acc[0.5]*100:.2f}% val_acc@0.75: {val_acc[0.75]*100:.2f}%")
         
@@ -297,6 +398,15 @@ def main():
     print("\n Test mean IoU:", test_mean_iou)
     print(f"accuracy@0.50: {test_acc[0.5]*100} %")
     print(f"accuracy@0.75: {test_acc[0.75]*100} %")
+    
+    metrics = evaluate_detection_metrics(model, test_ds, device)
+    
+    print("\nEVALUATION RESULTS")
+    print(f"Num samples: {metrics['num_samples']}")
+    print(f"Mean IoU: {metrics['mean_iou']:.4f}")
+    print(f"Mean normalized L1 error: {metrics['mean_l1']:.4f}")
+    print(f"AP@0.50: {metrics['ap_50']:.4f}")
+    print(f"mAP@0.50:0.95: {metrics['map_50_95']:.4f}")
     
 if __name__ == "__main__":
     main()
