@@ -11,7 +11,10 @@
 		class="content"
 		[@expandCollapse]="expanded ? 'expanded' : 'collapsed'"
 	>
-		<div class="values-column">
+		<div
+			class="values-column"
+			[style.grid-template-columns]="'repeat(' + valuesColumnCount + ', minmax(0, 1fr))'"
+		>
 			<div class="value-row" *ngFor="let entry of values">
 				<span class="label">{{ entry.label }}:</span>
 				<span class="value">{{ entry.value }}</span>

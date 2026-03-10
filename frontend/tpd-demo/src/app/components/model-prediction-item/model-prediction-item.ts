@@ -49,6 +49,7 @@ export class ModelPredictionItem {
   @Input() subTitle = '';
   @Input() values: PredictionValue[] = [];
   @Input() images: PredictionImage[] = [];
+  @Input() valuesColumnCount = 1;
 
   expanded = true;
 
