@@ -1,0 +1,25 @@
+.predictions-wrapper {
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+	width: 100%;
+}
+
+.loading {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	color: var(--tpd-primary);
+	background: white;
+	border-radius: 14px;
+	padding: 18px;
+	border: 1px solid var(--tpd-secondary);
+}
+
+.error {
+	background: #ffe9e9;
+	border: 1px solid #f4b4b4;
+	color: #9b1c1c;
+	padding: 12px;
+	border-radius: 10px;
+}

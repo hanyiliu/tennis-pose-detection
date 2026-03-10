@@ -1,0 +1,21 @@
+<div class="page-shell">
+	<app-navbar />
+
+	<main class="main-content">
+		<section class="upload-state" *ngIf="!hasUploadedImage()">
+			<app-import-image-button (imageSelected)="onImageSelected($event)" />
+		</section>
+
+		<section class="prediction-state" *ngIf="hasUploadedImage()">
+			<app-model-predictions
+				[originalImageUrl]="originalImageUrl()"
+				[predictions]="predictions()"
+				[isLoading]="isLoading()"
+				[errorMessage]="errorMessage()"
+				(makeAnotherPrediction)="resetPrediction()"
+			/>
+		</section>
+	</main>
+
+	<app-footer />
+</div>
