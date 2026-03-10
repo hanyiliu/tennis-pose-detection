@@ -41,8 +41,9 @@ class ModelService:
         self.pose_model = None
         self.label_names = POSE_KEYS
 
+        e2e_candidates = self._e2e_candidate_paths(settings.pose_model_path)
+        loaded_from_e2e = self._try_load_e2e_bundle(e2e_candidates)
         pose_candidates = self._pose_candidate_paths(settings.pose_model_path)
-        loaded_from_e2e = self._try_load_e2e_bundle(pose_candidates)
         if not loaded_from_e2e:
             self.pose_model = self._load_pose_model(pose_candidates)
             self.label_names = self._load_pose_label_names(pose_candidates)
@@ -76,6 +77,8 @@ class ModelService:
         seen = set()
         for raw_path in [
             preferred_path,
+            "exports/colab_e2e_best_2.pt",
+            "checkpoints/colab_e2e_best_2.pt",
             "exports/e2e_best.pt",
             "checkpoints/e2e_best.pt",
             "exports/pose_best_predicted_attention.pt",
@@ -84,6 +87,22 @@ class ModelService:
             "checkpoints/pose_best_predicted.pt",
             "exports/pose_best.pt",
             "checkpoints/pose_best.pt",
+        ]:
+            resolved = self.settings.resolve_path(raw_path)
+            if str(resolved) not in seen:
+                seen.add(str(resolved))
+                candidates.append(resolved)
+        return candidates
+
+    def _e2e_candidate_paths(self, preferred_path: str) -> list[Path]:
+        candidates: list[Path] = []
+        seen = set()
+        for raw_path in [
+            "exports/colab_e2e_best_2.pt",
+            "checkpoints/colab_e2e_best_2.pt",
+            preferred_path,
+            "exports/e2e_best.pt",
+            "checkpoints/e2e_best.pt",
         ]:
             resolved = self.settings.resolve_path(raw_path)
             if str(resolved) not in seen:
