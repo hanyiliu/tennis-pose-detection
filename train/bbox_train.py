@@ -18,7 +18,6 @@ import kagglehub
 from torch.utils.data import Subset
 from torchvision.ops import complete_box_iou_loss
 
-import random
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -34,15 +33,6 @@ path = os.path.join(
     path,
     "Tennis Player Actions Dataset for Human Pose Estimation"
 )
-
-def set_seed(seed: int = 42):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
 
 # checking which GPU we're using (NVIDIA vs Apple vs other)
 def get_device():
@@ -127,6 +117,35 @@ def bbox_iou_xyxy(pred, target, eps=1e-7):
     union = p_area + t_area - inter
     return inter / (union + eps)
 
+def compute_iou_xywh(gt_box, pred_box, eps=1e-7):
+    gx1, gy1, gw, gh = gt_box
+    px1, py1, pw, ph = pred_box
+    
+    gx2 = gx1 + gw
+    gy2 = gy1 + gh
+    px2 = px1 + pw
+    py2 = py1 + ph
+    
+    gx1, gx2 = min(gx1, gx2), max(gx1, gx2)
+    gy1, gy2 = min(gy1, gy2), max(gy1, gy2)
+    px1, px2 = min(px1, px2), max(px1, px2)
+    py1, py2 = min(py1, py2), max(py1, py2)
+    
+    ix1 = max(gx1, px1)
+    iy1 = max(gy1, py1)
+    ix2 = min(gx2, px2)
+    iy2 = min(gy2, py2)
+    
+    iw = max(0.0, ix2 - ix1)
+    ih = max(0.0, iy2 - iy1)
+    inter = iw * ih
+
+    g_area = max(0.0, gx2 - gx1) * max(0.0, gy2 - gy1)
+    p_area = max(0.0, px2 - px1) * max(0.0, py2 - py1)
+    
+    union = p_area + g_area - inter
+    return inter / (union + eps)
+
 def ciou_loss_xywh(preds: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     # IoU loss = mean(1 - IoU), where IoU is computed after converting cxcywh -> xyxy
     preds_xyxy = sanitize_xyxy(xywh_to_xyxy(preds))
@@ -172,13 +191,12 @@ def iou_evaluate(model, loader, criterion, device, iou_thresholds=(0.5, 0.75)):
 
 def evaluate_detection_metrics(model, dataset_for_model, device):
     """
-    Evaluates:
       - mean IoU
       - mean L1 error
       - AP@0.50
       - mAP@0.50:0.95
       - AP by threshold
-    dataset_for_model should return (img_tensor, gt_bbox_norm)
+    dataset_for_model: (img_tensor, gt_bbox_norm)
     """
     model.eval()
 
@@ -193,7 +211,7 @@ def evaluate_detection_metrics(model, dataset_for_model, device):
 
         gt_bbox_norm_i = gt_bbox_norm_i.numpy()
 
-        iou_i = bbox_iou_xyxy(gt_bbox_norm_i, pred_bbox_norm_i)
+        iou_i = compute_iou_xywh(gt_bbox_norm_i, pred_bbox_norm_i)
         l1_i = float(np.mean(np.abs(pred_bbox_norm_i - gt_bbox_norm_i)))
 
         ious.append(iou_i)
@@ -217,26 +235,29 @@ def evaluate_detection_metrics(model, dataset_for_model, device):
         "ap_by_threshold": ap_by_threshold,
     }
 
-def plot_training_curve(train_losses, val_losses, train_accs, val_accs):
-    epochs = range(1, len(train_losses) + 1)
-    plt.figure(figsize=(8,5))
-    plt.plot(epochs, train_losses, label="Train Loss")
-    plt.plot(epochs, val_losses, label="Validation Loss")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.title("Training and Validation Loss")
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-    
-    plt.figure(figsize=(8,5))
-    plt.plot(epochs, train_accs, label="Train Accuracy")
-    plt.plot(epochs, val_accs, label="Validation Accuracy")
-    plt.xlabel("Epoch")
-    plt.ylabel("Accuracy")
-    plt.title("Training and Validation Accuracy")
-    plt.legend()
-    plt.grid(True)
+def plot_map_bar_chart(train_map, test_map, output_dir="evaluation_outputs"):
+    os.makedirs(output_dir, exist_ok=True)
+
+    labels = ["Training", "Test"]
+    values = [train_map, test_map]
+
+    plt.figure(figsize=(6, 5))
+    bars = plt.bar(labels, values)
+    plt.ylim(0, 1)
+    plt.ylabel("mAP@0.50:0.95")
+    plt.title("Bounding Box Model Performance")
+
+    for bar, val in zip(bars, values):
+        plt.text(
+            bar.get_x() + bar.get_width() / 2,
+            val + 0.02,
+            f"{val:.4f}",
+            ha="center"
+        )
+
+    save_path = os.path.join(output_dir, "bbox_mAP_bar_chart.png")
+    plt.tight_layout()
+    plt.savefig(save_path)
     plt.show()
 
 def main():
@@ -298,6 +319,8 @@ def main():
     train_ds = Subset(train_dataset, train_idx)
     val_ds = Subset(eval_dataset, val_idx)
     test_ds = Subset(eval_dataset, test_idx)
+    
+    train_eval_ds = Subset(eval_dataset, train_idx)
     
     # DataLoader does:
     # batching- returns batches instead of single samples
@@ -370,6 +393,8 @@ def main():
                 preds_xyxy = sanitize_xyxy(xywh_to_xyxy(preds_clamped))
                 bboxes_xyxy = sanitize_xyxy(xywh_to_xyxy(bboxes_clamped))
                 ious = bbox_iou_xyxy(preds_xyxy, bboxes_xyxy)
+                train_sum_iou += ious.sum().item()
+                train_correct_50 += (ious >= 0.5).sum().item()
             
         # average loss over all training samples for this epoch
         train_loss = total_loss / max(n, 1)
@@ -399,14 +424,28 @@ def main():
     print(f"accuracy@0.50: {test_acc[0.5]*100} %")
     print(f"accuracy@0.75: {test_acc[0.75]*100} %")
     
-    metrics = evaluate_detection_metrics(model, test_ds, device)
+    train_metrics = evaluate_detection_metrics(model, train_eval_ds, device)
+    test_metrics = evaluate_detection_metrics(model, test_ds, device)
     
-    print("\nEVALUATION RESULTS")
-    print(f"Num samples: {metrics['num_samples']}")
-    print(f"Mean IoU: {metrics['mean_iou']:.4f}")
-    print(f"Mean normalized L1 error: {metrics['mean_l1']:.4f}")
-    print(f"AP@0.50: {metrics['ap_50']:.4f}")
-    print(f"mAP@0.50:0.95: {metrics['map_50_95']:.4f}")
+    print("\nTRAINING EVALUATION RESULTS")
+    print(f"Num samples: {train_metrics['num_samples']}")
+    print(f"Mean IoU: {train_metrics['mean_iou']:.4f}")
+    print(f"Mean normalized L1 error: {train_metrics['mean_l1']:.4f}")
+    print(f"AP@0.50: {train_metrics['ap_50']:.4f}")
+    print(f"mAP@0.50:0.95: {train_metrics['map_50_95']:.4f}")
+
+    print("\nTEST EVALUATION RESULTS")
+    print(f"Num samples: {test_metrics['num_samples']}")
+    print(f"Mean IoU: {test_metrics['mean_iou']:.4f}")
+    print(f"Mean normalized L1 error: {test_metrics['mean_l1']:.4f}")
+    print(f"AP@0.50: {test_metrics['ap_50']:.4f}")
+    print(f"mAP@0.50:0.95: {test_metrics['map_50_95']:.4f}")
+    
+    plot_map_bar_chart(
+        train_map=train_metrics["map_50_95"],
+        test_map=test_metrics["map_50_95"],
+        output_dir="evaluation_outputs"
+    )
     
 if __name__ == "__main__":
     main()
