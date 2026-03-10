@@ -37,8 +37,8 @@ class ModelService:
 
         self.bbox_model = BBoxDetectionModel().to(self.device)
         self.keypoint_model = KeypointDetectionModel(num_keypoints=18).to(self.device)
-        self.pose_model = self._load_pose_model(self._candidate_paths(settings.pose_model_path, "pose_best.pt"))
-        self.label_names = self._load_pose_label_names(self._candidate_paths(settings.pose_model_path, "pose_best.pt"))
+        self.pose_model = self._load_pose_model(self._candidate_paths(settings.pose_model_path, "pose_best_predicted.pt"))
+        self.label_names = self._load_pose_label_names(self._candidate_paths(settings.pose_model_path, "pose_best_predicted.pt"))
 
         self._load_bbox_weights(self._candidate_paths(settings.bbox_model_path, "bbox_best.pt"))
         self._load_keypoint_weights(self._candidate_paths(settings.keypoint_model_path, "keypoint_best_state_dict.pt"))
@@ -51,12 +51,14 @@ class ModelService:
             bbox_detection=self.bbox_model,
             keypoint_detection=self.keypoint_model,
             pose_detection=self.pose_model,
+            bbox_image_size=self.bbox_image_size,
+            keypoint_image_size=self.keypoint_image_size,
         )
 
     def _candidate_paths(self, preferred_path: str, fallback_name: str) -> list[Path]:
         candidates: list[Path] = []
         seen = set()
-        for raw_path in [preferred_path, f"checkpoints/{fallback_name}"]:
+        for raw_path in [preferred_path, f"exports/{fallback_name}", f"checkpoints/{fallback_name}"]:
             resolved = self.settings.resolve_path(raw_path)
             if str(resolved) not in seen:
                 seen.add(str(resolved))
@@ -101,32 +103,44 @@ class ModelService:
         raise FileNotFoundError(f"Keypoint checkpoint not found in any candidate path: {candidate_paths}")
 
     def _load_pose_model(self, candidate_paths: list[Path]):
-        checkpoint = None
         load_errors: list[str] = []
         for checkpoint_path in candidate_paths:
             if not checkpoint_path.exists():
                 continue
             try:
                 checkpoint = torch.load(checkpoint_path, map_location=self.device)
-                break
+                if not isinstance(checkpoint, dict):
+                    raise ValueError("Unsupported pose checkpoint format. Expected dict payload.")
+
+                if "model_state" in checkpoint:
+                    state_dict = checkpoint["model_state"]
+                else:
+                    state_dict = checkpoint
+
+                if not isinstance(state_dict, dict):
+                    raise ValueError("Unsupported pose checkpoint format. Missing valid model state dictionary.")
+
+                args = checkpoint.get("args", {}) if isinstance(checkpoint.get("args", {}), dict) else {}
+                out_weight = state_dict.get("out.weight")
+                inferred_num_classes = int(out_weight.shape[0]) if isinstance(out_weight, torch.Tensor) else 4
+
+                model = PoseClassificationModel(
+                    num_keypoints=18,
+                    num_classes=inferred_num_classes,
+                    hidden_dim=args.get("hidden_dim", 512),
+                    dropout=args.get("dropout", 0.25),
+                    visibility_threshold=args.get("visibility_threshold", 0.0),
+                ).to(self.device)
+                model.load_state_dict(state_dict)
+                return model
             except RuntimeError as error:
                 load_errors.append(f"{checkpoint_path}: {error}")
+            except ValueError as error:
+                load_errors.append(f"{checkpoint_path}: {error}")
 
-        if checkpoint is None:
-            if load_errors:
-                raise RuntimeError("Unable to load a compatible pose checkpoint. " + " | ".join(load_errors))
-            raise FileNotFoundError(f"Pose checkpoint not found in any candidate path: {candidate_paths}")
-
-        args = checkpoint.get("args", {})
-        model = PoseClassificationModel(
-            num_keypoints=18,
-            num_classes=4,
-            hidden_dim=args.get("hidden_dim", 256),
-            dropout=args.get("dropout", 0.25),
-            visibility_threshold=args.get("visibility_threshold", 0.0),
-        ).to(self.device)
-        model.load_state_dict(checkpoint["model_state"])
-        return model
+        if load_errors:
+            raise RuntimeError("Unable to load a compatible pose checkpoint. " + " | ".join(load_errors))
+        raise FileNotFoundError(f"Pose checkpoint not found in any candidate path: {candidate_paths}")
 
     def _load_pose_label_names(self, candidate_paths: list[Path]):
         for checkpoint_path in candidate_paths:
