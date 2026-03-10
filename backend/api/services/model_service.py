@@ -32,6 +32,7 @@ class ModelService:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.device = torch.device(settings.device)
+        self.keypoint_image_size = (256, 256)
 
         self.bbox_model = BBoxDetectionModel().to(self.device)
         self.keypoint_model = KeypointDetectionModel(num_keypoints=18).to(self.device)
@@ -85,6 +86,10 @@ class ModelService:
                 checkpoint = torch.load(model_path, map_location=self.device)
                 if isinstance(checkpoint, dict) and "model_state" in checkpoint:
                     self.keypoint_model.load_state_dict(checkpoint["model_state"])
+                    image_height = checkpoint.get("image_height")
+                    image_width = checkpoint.get("image_width")
+                    if isinstance(image_height, int) and isinstance(image_width, int):
+                        self.keypoint_image_size = (image_height, image_width)
                 else:
                     self.keypoint_model.load_state_dict(checkpoint)
                 return
@@ -143,7 +148,7 @@ class ModelService:
         x1, y1, x2, y2 = bbox_xyxy
 
         cropped_bbox = crop_pil(image, bbox_xyxy)
-        keypoint_input = letterbox_resize(cropped_bbox.copy(), size=(256, 256))
+        keypoint_input = letterbox_resize(cropped_bbox.copy(), size=self.keypoint_image_size)
         keypoint_tensor = convert_image_to_tensor(keypoint_input).to(self.device)
         heatmaps = self.keypoint_model(keypoint_tensor.unsqueeze(0))
         keypoints = heatmaps_to_keypoints(heatmaps).squeeze(0)
@@ -154,16 +159,21 @@ class ModelService:
 
         probs = self.pipeline.pose_detection(keypoints_norm.to(self.device).unsqueeze(0)).squeeze(0).cpu().numpy()
         conf_map = self._map_pose_probabilities(probs)
-        predicted_label = max(conf_map, key=conf_map.get)
+        predicted_label = max(conf_map, key=lambda label: conf_map[label])
 
         keypoint_positions = np.asarray(keypoints_norm.cpu(), dtype=float).tolist()
-        keypoint_overlay = create_keypoint_overlay_image(keypoint_input, keypoints_norm)
+        keypoint_overlay = create_keypoint_overlay_image(
+            keypoint_input,
+            keypoints,
+            (heat_h, heat_w),
+        )
         heatmap_image = create_aggregated_heatmap_image(heatmaps.squeeze(0))
         class_bar_graph = create_class_prediction_bar_graph(conf_map)
         final_overlay = create_final_overlay_image(
             image=image,
             bbox_xyxy=bbox_xyxy,
-            keypoints_norm=keypoints_norm,
+            keypoints_xyv=keypoints,
+            keypoint_image_size=self.keypoint_image_size,
             prediction_label=predicted_label,
             confidence=conf_map[predicted_label],
         )
