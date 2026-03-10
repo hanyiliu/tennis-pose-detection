@@ -137,7 +137,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
 
     # model hyperparameters
-    parser.add_argument("--hidden_dim", type=int, default=256)
+    parser.add_argument("--hidden_dim", type=int, default=512)
     parser.add_argument("--dropout", type=float, default=0.25)
     parser.add_argument("--visibility_threshold", type=float, default=0.0)
 
