@@ -1,0 +1,49 @@
+Dataset root: datasets/orvile/tennis-player-actions-dataset/versions/1/Tennis Player Actions Dataset for Human Pose Estimation
+Device: cuda
+Train/Val/Test sizes: 1395 / 299 / 300
+Loaded bbox checkpoint: exports/bbox_best.pt
+Loaded keypoint checkpoint: exports/keypoint_best_state_dict.pt
+Loaded pose checkpoint: exports/pose_best_predicted.pt
+[Epoch 1] Training phase: stage3
+Epoch 001/60 | train loss: 1.3322 (bbox 0.1299, kp 0.0201, pose 1.1822) acc 0.5312 | val loss: 1.0977 (bbox 0.1237, kp 0.0176, pose 0.9565) acc 0.7090
+Epoch 002/60 | train loss: 1.1800 (bbox 0.1299, kp 0.0201, pose 1.0300) acc 0.5950 | val loss: 1.0160 (bbox 0.1237, kp 0.0176, pose 0.8748) acc 0.7124
+Epoch 003/60 | train loss: 1.1207 (bbox 0.1299, kp 0.0201, pose 0.9707) acc 0.6122 | val loss: 0.9573 (bbox 0.1237, kp 0.0176, pose 0.8161) acc 0.7258
+Epoch 004/60 | train loss: 1.0644 (bbox 0.1299, kp 0.0201, pose 0.9144) acc 0.6444 | val loss: 0.8927 (bbox 0.1237, kp 0.0176, pose 0.7515) acc 0.7458
+Epoch 005/60 | train loss: 1.0599 (bbox 0.1299, kp 0.0201, pose 0.9099) acc 0.6330 | val loss: 0.8710 (bbox 0.1237, kp 0.0176, pose 0.7298) acc 0.7726
+Epoch 006/60 | train loss: 1.0207 (bbox 0.1299, kp 0.0201, pose 0.8706) acc 0.6631 | val loss: 0.8399 (bbox 0.1237, kp 0.0176, pose 0.6986) acc 0.7425
+Epoch 007/60 | train loss: 0.9983 (bbox 0.1299, kp 0.0201, pose 0.8483) acc 0.6724 | val loss: 0.8425 (bbox 0.1237, kp 0.0176, pose 0.7013) acc 0.7860
+Epoch 008/60 | train loss: 0.9640 (bbox 0.1299, kp 0.0201, pose 0.8140) acc 0.6767 | val loss: 0.7950 (bbox 0.1237, kp 0.0176, pose 0.6538) acc 0.8027
+Epoch 009/60 | train loss: 0.9402 (bbox 0.1299, kp 0.0201, pose 0.7902) acc 0.6961 | val loss: 0.7643 (bbox 0.1237, kp 0.0176, pose 0.6231) acc 0.7860
+[Epoch 10] Training phase: stage2+stage3
+Epoch 010/60 | train loss: 0.7656 (bbox 0.1299, kp 0.0390, pose 0.5967) acc 0.7935 | val loss: 0.5159 (bbox 0.1237, kp 0.0382, pose 0.3540) acc 0.8930
+Epoch 011/60 | train loss: 0.5386 (bbox 0.1299, kp 0.0469, pose 0.3618) acc 0.8796 | val loss: 0.4523 (bbox 0.1237, kp 0.0478, pose 0.2809) acc 0.9097
+Epoch 012/60 | train loss: 0.4191 (bbox 0.1299, kp 0.0503, pose 0.2389) acc 0.9290 | val loss: 0.4022 (bbox 0.1237, kp 0.0492, pose 0.2294) acc 0.9365
+Epoch 013/60 | train loss: 0.3617 (bbox 0.1299, kp 0.0483, pose 0.1835) acc 0.9333 | val loss: 0.5137 (bbox 0.1237, kp 0.0563, pose 0.3337) acc 0.8896
+Epoch 014/60 | train loss: 0.3201 (bbox 0.1299, kp 0.0423, pose 0.1479) acc 0.9491 | val loss: 0.3733 (bbox 0.1237, kp 0.0390, pose 0.2107) acc 0.9197
+Epoch 015/60 | train loss: 0.2721 (bbox 0.1299, kp 0.0348, pose 0.1075) acc 0.9613 | val loss: 0.3796 (bbox 0.1237, kp 0.0362, pose 0.2197) acc 0.9431
+Epoch 016/60 | train loss: 0.2586 (bbox 0.1299, kp 0.0341, pose 0.0946) acc 0.9685 | val loss: 0.4307 (bbox 0.1237, kp 0.0343, pose 0.2728) acc 0.9064
+Epoch 017/60 | train loss: 0.2329 (bbox 0.1299, kp 0.0287, pose 0.0743) acc 0.9742 | val loss: 0.3816 (bbox 0.1237, kp 0.0194, pose 0.2385) acc 0.9331
+Epoch 018/60 | train loss: 0.2028 (bbox 0.1299, kp 0.0234, pose 0.0495) acc 0.9857 | val loss: 0.3894 (bbox 0.1237, kp 0.0184, pose 0.2474) acc 0.9331
+Epoch 019/60 | train loss: 0.1908 (bbox 0.1299, kp 0.0211, pose 0.0399) acc 0.9878 | val loss: 0.3640 (bbox 0.1237, kp 0.0183, pose 0.2220) acc 0.9365
+Epoch 020/60 | train loss: 0.1988 (bbox 0.1299, kp 0.0197, pose 0.0492) acc 0.9864 | val loss: 0.4167 (bbox 0.1237, kp 0.0202, pose 0.2729) acc 0.9331
+Epoch 021/60 | train loss: 0.1725 (bbox 0.1299, kp 0.0173, pose 0.0253) acc 0.9935 | val loss: 0.3893 (bbox 0.1237, kp 0.0155, pose 0.2502) acc 0.9331
+Epoch 022/60 | train loss: 0.1623 (bbox 0.1299, kp 0.0159, pose 0.0165) acc 0.9957 | val loss: 0.3503 (bbox 0.1237, kp 0.0136, pose 0.2130) acc 0.9398
+Epoch 023/60 | train loss: 0.1588 (bbox 0.1299, kp 0.0140, pose 0.0148) acc 0.9950 | val loss: 0.3634 (bbox 0.1237, kp 0.0150, pose 0.2247) acc 0.9398
+Epoch 024/60 | train loss: 0.1607 (bbox 0.1299, kp 0.0141, pose 0.0168) acc 0.9978 | val loss: 0.3428 (bbox 0.1237, kp 0.0135, pose 0.2057) acc 0.9365
+Epoch 025/60 | train loss: 0.1537 (bbox 0.1299, kp 0.0136, pose 0.0102) acc 0.9971 | val loss: 0.3662 (bbox 0.1237, kp 0.0115, pose 0.2310) acc 0.9365
+Epoch 026/60 | train loss: 0.1509 (bbox 0.1299, kp 0.0122, pose 0.0087) acc 0.9978 | val loss: 0.3935 (bbox 0.1237, kp 0.0112, pose 0.2587) acc 0.9298
+Epoch 027/60 | train loss: 0.1495 (bbox 0.1299, kp 0.0119, pose 0.0078) acc 0.9986 | val loss: 0.3879 (bbox 0.1237, kp 0.0115, pose 0.2528) acc 0.9365
+Epoch 028/60 | train loss: 0.1466 (bbox 0.1299, kp 0.0117, pose 0.0050) acc 1.0000 | val loss: 0.3861 (bbox 0.1237, kp 0.0105, pose 0.2519) acc 0.9298
+Epoch 029/60 | train loss: 0.1471 (bbox 0.1299, kp 0.0113, pose 0.0059) acc 0.9993 | val loss: 0.3896 (bbox 0.1237, kp 0.0105, pose 0.2554) acc 0.9264
+[Epoch 30] Training phase: stage1+stage2+stage3
+Epoch 030/60 | train loss: 1.7120 (bbox 0.3263, kp 0.0573, pose 1.3283) acc 0.6595 | val loss: 2.0547 (bbox 0.3772, kp 0.0811, pose 1.5964) acc 0.4849
+Epoch 031/60 | train loss: 2.0258 (bbox 0.3987, kp 0.0865, pose 1.5406) acc 0.5190 | val loss: 1.6196 (bbox 0.4568, kp 0.1017, pose 1.0612) acc 0.5318
+Epoch 032/60 | train loss: 1.2481 (bbox 0.3231, kp 0.0538, pose 0.8711) acc 0.6595 | val loss: 0.9177 (bbox 0.2658, kp 0.0348, pose 0.6171) acc 0.7625
+Epoch 033/60 | train loss: 1.1528 (bbox 0.3402, kp 0.0533, pose 0.7593) acc 0.7219 | val loss: 0.8871 (bbox 0.3024, kp 0.0255, pose 0.5592) acc 0.7893
+Epoch 034/60 | train loss: 0.8273 (bbox 0.2807, kp 0.0367, pose 0.5099) acc 0.8186 | val loss: 1.0082 (bbox 0.2947, kp 0.0473, pose 0.6662) acc 0.7525
+Early stopping triggered at epoch 34
+Best val acc: 0.9431
+Best val loss: 0.3428
+Saved checkpoint: checkpoints/e2e_best.pt
+Saved export: exports/e2e_best.pt
+Test loss: 0.5265 (bbox 0.1247, kp 0.0148, pose 0.3870) acc 0.9133

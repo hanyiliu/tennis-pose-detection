@@ -15,6 +15,7 @@ from backend.api.utils.image_outputs import (
 )
 from inference.inference import InferencePipeline
 from models.bbox_detection import BBoxDetectionModel
+from models.keypoint_attention_detection import KeypointAttentionDetectionModel
 from models.keypoint_detection import KeypointDetectionModel
 from models.pose_classification import PoseClassificationModel
 from preprocessing.image_preprocessing import convert_image_to_tensor
@@ -33,15 +34,20 @@ class ModelService:
         self.settings = settings
         self.device = torch.device(settings.device)
         self.bbox_image_size = (256, 256)
-        self.keypoint_image_size = (256, 256)
+        self.keypoint_image_size = (128, 128)
 
         self.bbox_model = BBoxDetectionModel().to(self.device)
         self.keypoint_model = KeypointDetectionModel(num_keypoints=18).to(self.device)
-        self.pose_model = self._load_pose_model(self._candidate_paths(settings.pose_model_path, "pose_best_predicted.pt"))
-        self.label_names = self._load_pose_label_names(self._candidate_paths(settings.pose_model_path, "pose_best_predicted.pt"))
+        self.pose_model = None
+        self.label_names = POSE_KEYS
 
-        self._load_bbox_weights(self._candidate_paths(settings.bbox_model_path, "bbox_best.pt"))
-        self._load_keypoint_weights(self._candidate_paths(settings.keypoint_model_path, "keypoint_best_state_dict.pt"))
+        pose_candidates = self._pose_candidate_paths(settings.pose_model_path)
+        loaded_from_e2e = self._try_load_e2e_bundle(pose_candidates)
+        if not loaded_from_e2e:
+            self.pose_model = self._load_pose_model(pose_candidates)
+            self.label_names = self._load_pose_label_names(pose_candidates)
+            self._load_bbox_weights(self._candidate_paths(settings.bbox_model_path, "bbox_best.pt"))
+            self._load_keypoint_weights(self._candidate_paths(settings.keypoint_model_path, "keypoint_best_state_dict.pt"))
 
         self.bbox_model.eval()
         self.keypoint_model.eval()
@@ -64,6 +70,79 @@ class ModelService:
                 seen.add(str(resolved))
                 candidates.append(resolved)
         return candidates
+
+    def _pose_candidate_paths(self, preferred_path: str) -> list[Path]:
+        candidates: list[Path] = []
+        seen = set()
+        for raw_path in [
+            preferred_path,
+            "exports/e2e_best.pt",
+            "checkpoints/e2e_best.pt",
+            "exports/pose_best_predicted_attention.pt",
+            "checkpoints/pose_best_predicted_attention.pt",
+            "exports/pose_best_predicted.pt",
+            "checkpoints/pose_best_predicted.pt",
+            "exports/pose_best.pt",
+            "checkpoints/pose_best.pt",
+        ]:
+            resolved = self.settings.resolve_path(raw_path)
+            if str(resolved) not in seen:
+                seen.add(str(resolved))
+                candidates.append(resolved)
+        return candidates
+
+    def _try_load_e2e_bundle(self, candidate_paths: list[Path]) -> bool:
+        for checkpoint_path in candidate_paths:
+            if not checkpoint_path.exists():
+                continue
+
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+            if not isinstance(checkpoint, dict):
+                continue
+
+            if not all(key in checkpoint for key in ["bbox_model_state", "keypoint_model_state", "pose_model_state"]):
+                continue
+
+            self.bbox_model.load_state_dict(checkpoint["bbox_model_state"])
+
+            keypoint_state = checkpoint["keypoint_model_state"]
+            if not isinstance(keypoint_state, dict):
+                raise ValueError(f"Invalid keypoint_model_state in e2e checkpoint: {checkpoint_path}")
+
+            num_keypoints = 18
+            has_attention_keys = any(key.startswith("encoder.stem.") for key in keypoint_state.keys())
+            if has_attention_keys:
+                self.keypoint_model = KeypointAttentionDetectionModel(num_keypoints=num_keypoints).to(self.device)
+            else:
+                self.keypoint_model = KeypointDetectionModel(num_keypoints=num_keypoints).to(self.device)
+            self.keypoint_model.load_state_dict(keypoint_state)
+
+            self.keypoint_image_size = (
+                int(checkpoint.get("keypoint_image_height", self.keypoint_image_size[0])),
+                int(checkpoint.get("keypoint_image_width", self.keypoint_image_size[1])),
+            )
+
+            args = checkpoint.get("args", {}) if isinstance(checkpoint.get("args", {}), dict) else {}
+            label_names = checkpoint.get("label_names")
+            if isinstance(label_names, list) and len(label_names) == 4:
+                normalized_labels = [_normalize_label(label) for label in label_names]
+            else:
+                normalized_labels = POSE_KEYS
+
+            out_weight = checkpoint["pose_model_state"].get("out.weight")
+            inferred_num_classes = int(out_weight.shape[0]) if isinstance(out_weight, torch.Tensor) else len(normalized_labels)
+            self.pose_model = PoseClassificationModel(
+                num_keypoints=18,
+                num_classes=inferred_num_classes,
+                hidden_dim=int(args.get("hidden_dim", 384)),
+                dropout=float(args.get("dropout", 0.4)),
+                visibility_threshold=float(args.get("visibility_threshold", 0.0)),
+            ).to(self.device)
+            self.pose_model.load_state_dict(checkpoint["pose_model_state"])
+            self.label_names = normalized_labels
+            return True
+
+        return False
 
     def _load_bbox_weights(self, candidate_paths: list[Path]):
         errors: list[str] = []
@@ -114,6 +193,8 @@ class ModelService:
 
                 if "model_state" in checkpoint:
                     state_dict = checkpoint["model_state"]
+                elif "pose_model_state" in checkpoint:
+                    state_dict = checkpoint["pose_model_state"]
                 else:
                     state_dict = checkpoint
 
