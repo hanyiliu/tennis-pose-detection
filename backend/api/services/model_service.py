@@ -32,6 +32,7 @@ class ModelService:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.device = torch.device(settings.device)
+        self.bbox_image_size = (256, 256)
         self.keypoint_image_size = (256, 256)
 
         self.bbox_model = BBoxDetectionModel().to(self.device)
@@ -141,7 +142,8 @@ class ModelService:
     def predict(self, image: Image.Image) -> dict:
         image_width, image_height = image.size
 
-        bbox_img = letterbox_resize(image.copy(), size=(256, 256))
+        bbox_h, bbox_w = self.bbox_image_size
+        bbox_img = image.copy().resize((bbox_w, bbox_h), Image.Resampling.BILINEAR)
         bbox_tensor = convert_image_to_tensor(bbox_img).to(self.device)
         bbox_pred = self.bbox_model(bbox_tensor.unsqueeze(0)).squeeze(0)
         bbox_xyxy = norm_bbox_to_xyxy_pixels(bbox_pred, image_width, image_height)
