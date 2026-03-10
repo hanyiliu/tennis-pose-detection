@@ -1,5 +1,6 @@
 from preprocessing.pil_preprocessing import crop_pil, letterbox_resize, norm_bbox_to_xyxy_pixels
 from preprocessing.tensor_preprocessing import heatmaps_to_keypoints, normalize_keypoints_xy
+from preprocessing.image_preprocessing import convert_image_to_tensor
 from torchvision import transforms
 
 

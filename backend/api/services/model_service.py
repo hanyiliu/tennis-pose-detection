@@ -127,9 +127,9 @@ class ModelService:
                 model = PoseClassificationModel(
                     num_keypoints=18,
                     num_classes=inferred_num_classes,
-                    hidden_dim=args.get("hidden_dim", 512),
-                    dropout=args.get("dropout", 0.25),
-                    visibility_threshold=args.get("visibility_threshold", 0.0),
+                    hidden_dim=int(args.get("hidden_dim", 384)),
+                    dropout=float(args.get("dropout", 0.4)),
+                    visibility_threshold=float(args.get("visibility_threshold", 0.0)),
                 ).to(self.device)
                 model.load_state_dict(state_dict)
                 return model
