@@ -271,9 +271,12 @@ class ModelService:
 
         heat_h = heatmaps.size(2)
         heat_w = heatmaps.size(3)
-        keypoints_norm = normalize_keypoints_xy(keypoints, heat_h, heat_w).squeeze(0)
+        kp_h, kp_w = self.keypoint_image_size
+        keypoints_norm = normalize_keypoints_xy(keypoints, kp_h, kp_w).squeeze(0)
 
-        probs = self.pipeline.pose_detection(keypoints_norm.to(self.device).unsqueeze(0)).squeeze(0).cpu().numpy()
+        pose_tensor = keypoints_norm.to(self.device).unsqueeze(0)
+        pose_probs = self.pose_model(pose_tensor)
+        probs = torch.softmax(pose_probs, dim=-1).squeeze(0).cpu().numpy()
         conf_map = self._map_pose_probabilities(probs)
         predicted_label = max(conf_map, key=lambda label: conf_map[label])
 
