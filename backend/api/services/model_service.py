@@ -80,8 +80,6 @@ class ModelService:
             "checkpoints/colab_e2e_best_2.pt",
             "exports/e2e_best.pt",
             "checkpoints/e2e_best.pt",
-            "exports/pose_best_predicted_attention.pt",
-            "checkpoints/pose_best_predicted_attention.pt",
             "exports/pose_best_predicted.pt",
             "checkpoints/pose_best_predicted.pt",
             "exports/pose_best.pt",
