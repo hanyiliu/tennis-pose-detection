@@ -62,26 +62,75 @@ def augment_keypoints(keypoints: torch.Tensor, xy_noise_std: float = 0.0, joint_
     return keypoint_clone
 
 
-@torch.no_grad() # don't track gradients during evaluation, this makes it more memory efficient and faster since we don't need to compute gradients or keep track of computation graph.
+@torch.no_grad()  # don't track gradients during evaluation, this makes it more memory efficient and faster since we don't need to compute gradients or keep track of computation graph.
 def evaluate(model, loader, device):
-    model.eval() # disables dropout, uses deterministic behavior
-    criterion = nn.CrossEntropyLoss() # plain cross entropy for evaluation reporting
+    model.eval()  # disables dropout, uses deterministic behavior
+    criterion = nn.CrossEntropyLoss()  # plain cross entropy for evaluation reporting
 
     total_loss = 0.0
     total = 0
     correct = 0
 
-    for keypoints, label in loader: # loop through batches, move tensor to GPU/CPU.
+    for keypoints, label in loader:  # loop through batches, move tensor to GPU/CPU.
         keypoints = keypoints.to(device)
         label = label.to(device)
 
-        logits = model(keypoints, return_logits=True) # forward pass
-        loss = criterion(logits, label) # computes loss for this batch
+        logits = model(keypoints, return_logits=True)  # forward pass
+        loss = criterion(logits, label)  # computes loss for this batch
         total_loss += loss.item() * label.size(0)
-        total += label.size(0) # accumulate total number of samples seen so far (for averaging loss and accuracy)
-        correct += (logits.argmax(dim=1) == label).sum().item() # compute number of correct predictions in this batch and accumulate
+        total += label.size(0)  # accumulate total number of samples seen so far (for averaging loss and accuracy)
+        correct += (logits.argmax(dim=1) == label).sum().item()  # compute number of correct predictions in this batch and accumulate
 
-    return total_loss / max(total, 1), correct / max(total, 1) # return average loss and accuracy over the whole dataset
+    return total_loss / max(total, 1), correct / max(total, 1)  # return average loss and accuracy over the whole dataset
+
+
+@torch.no_grad()
+def evaluate_pose_metrics(model, loader, device, num_classes=4):
+    """
+    Evaluate Stage 3 pose classification on a given subset and return:
+      - accuracy
+      - per-class accuracy
+      - raw correct / total counts per class
+    """
+    model.eval()
+
+    total = 0
+    correct = 0
+    class_correct = np.zeros(num_classes, dtype=np.int64)
+    class_total = np.zeros(num_classes, dtype=np.int64)
+
+    for keypoints, label in loader:
+        keypoints = keypoints.to(device)
+        label = label.to(device)
+
+        logits = model(keypoints, return_logits=True)
+        preds = torch.argmax(logits, dim=1)
+
+        total += label.size(0)
+        correct += (preds == label).sum().item()
+
+        label_cpu = label.detach().cpu().numpy()
+        preds_cpu = preds.detach().cpu().numpy()
+
+        for true_label, pred_label in zip(label_cpu, preds_cpu):
+            class_total[true_label] += 1
+            if true_label == pred_label:
+                class_correct[true_label] += 1
+
+    accuracy = correct / max(total, 1)
+    class_accuracy = np.divide(
+        class_correct,
+        np.maximum(class_total, 1),
+        dtype=np.float64,
+    )
+
+    return {
+        "num_samples": total,
+        "accuracy": float(accuracy),
+        "class_correct": class_correct,
+        "class_total": class_total,
+        "class_accuracy": class_accuracy,
+    }
 
 
 @torch.no_grad()
@@ -125,17 +174,86 @@ def evaluate_with_confusion_matrix(model, loader, device, save_path="evaluation_
     print(f"Saved confusion matrix to: {save_path}")
 
 
+def save_training_curves(train_losses, val_losses, train_accuracies, val_accuracies, save_dir="evaluation_outputs"):
+    """
+    Saves Stage 3 training curves:
+        - loss vs epoch
+        - accuracy vs epoch
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    epochs = range(1, len(train_losses) + 1)
+
+    # -------- loss curve --------
+    plt.figure(figsize=(8, 5))
+    plt.plot(epochs, train_losses, label="Train Loss")
+    plt.plot(epochs, val_losses, label="Val Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Stage 3 Predicted-Keypoint Training Loss")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, "stage3_predicted_training_loss.png"), dpi=200)
+    plt.close()
+
+    # -------- accuracy curve --------
+    plt.figure(figsize=(8, 5))
+    plt.plot(epochs, train_accuracies, label="Train Accuracy")
+    plt.plot(epochs, val_accuracies, label="Val Accuracy")
+    plt.xlabel("Epoch")
+    plt.ylabel("Accuracy")
+    plt.title("Stage 3 Predicted-Keypoint Training Accuracy")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, "stage3_predicted_training_accuracy.png"), dpi=200)
+    plt.close()
+
+    print(f"Saved training curves to: {save_dir}")
+
+    # -------- accuracy bar graph --------
+def plot_pose_accuracy_bar_chart(train_acc, test_acc, output_dir="evaluation_outputs"):
+    """
+    Save a Stage 3 bar chart comparing train vs test classification accuracy.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    labels = ["Training", "Test"]
+    values = [train_acc, test_acc]
+
+    plt.figure(figsize=(6, 5))
+    bars = plt.bar(labels, values)
+    plt.ylim(0, 1)
+    plt.ylabel("Accuracy")
+    plt.title("Pose Classification Model Performance")
+
+    for bar, val in zip(bars, values):
+        plt.text(
+            bar.get_x() + bar.get_width() / 2,
+            val + 0.02,
+            f"{val:.4f}",
+            ha="center"
+        )
+
+    save_path = os.path.join(output_dir, "pose_accuracy_bar_chart.png")
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=200)
+    plt.show()
+    plt.close()
+
+    print(f"Saved pose accuracy bar chart to: {save_path}")
+
+
 def main():
     parser = argparse.ArgumentParser()
 
-    # path to cached Stage 2 predicted keypoints
+    # path to cached Stage 2 predicted keypoints (hyperparameters set for lower training accuracy to match test accuracy, don't want overfitting? need better keypoint input.)
     parser.add_argument("--feature_path", type=str, required=True)
 
     # Hyperparameters and settings
     parser.add_argument("--epochs", type=int, default=120)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=5e-4)
-    parser.add_argument("--weight_decay", type=float, default=1e-2)
+    parser.add_argument("--weight_decay", type=float, default=3e-2)
 
     # dataset and splits
     parser.add_argument("--train_split", type=float, default=0.7)
@@ -144,19 +262,19 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
 
     # model hyperparameters
-    parser.add_argument("--hidden_dim", type=int, default=512)
-    parser.add_argument("--dropout", type=float, default=0.20)
+    parser.add_argument("--hidden_dim", type=int, default=256)
+    parser.add_argument("--dropout", type=float, default=0.35)
     parser.add_argument("--visibility_threshold", type=float, default=0.15)
 
     # data augmentation hyperparameters (for training only, val/test remain clean)
     # predicted keypoints already contain real Stage 2 noise, so keep these light
-    parser.add_argument("--xy_noise_std", type=float, default=0.003)
-    parser.add_argument("--joint_dropout", type=float, default=0.03)
+    parser.add_argument("--xy_noise_std", type=float, default=0.006)
+    parser.add_argument("--joint_dropout", type=float, default=0.06)
 
     # optimization stability improvements
-    parser.add_argument("--label_smoothing", type=float, default=0.05) # softens targets slightly so the model does not become overconfident too early
-    parser.add_argument("--grad_clip_norm", type=float, default=1.0)   # clips gradient norm to prevent exploding updates
-    parser.add_argument("--early_stop_patience", type=int, default=20) # stop if validation accuracy does not improve for many epochs
+    parser.add_argument("--label_smoothing", type=float, default=0.05)  # softens targets slightly so the model does not become overconfident too early
+    parser.add_argument("--grad_clip_norm", type=float, default=1.0)    # clips gradient norm to prevent exploding updates
+    parser.add_argument("--early_stop_patience", type=int, default=12)  # stop if validation accuracy does not improve for many epochs
 
     args = parser.parse_args()
 
@@ -195,6 +313,10 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
 
+    # separate eval loaders so train accuracy is measured cleanly without shuffle / augmentation
+    train_eval_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=False)
+    test_eval_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
+
     # device info.
     device = get_device()
     print("Device:", device)
@@ -230,9 +352,15 @@ def main():
     best_val_acc = -1.0
     epochs_without_improvement = 0
 
+    # stores per-epoch metrics so we can plot training curves at the end
+    train_losses = []
+    val_losses = []
+    train_accuracies = []
+    val_accuracies = []
+
     # Training Loop
     for epoch in range(1, args.epochs + 1):
-        model.train() # enables dropout, training mode
+        model.train()  # enables dropout, training mode
 
         # accumulates training stats.
         total_loss = 0.0
@@ -253,14 +381,14 @@ def main():
 
             # clears old gradients, forward pass, compute loss, backward pass, and update weights.
             optimizer.zero_grad(set_to_none=True)
-            logits = model(keypoints, return_logits=True) # forward pass
-            loss = criterion(logits, label) # calc. loss
-            loss.backward() # backward pass, computes gradients
+            logits = model(keypoints, return_logits=True)  # forward pass
+            loss = criterion(logits, label)  # calc. loss
+            loss.backward()  # backward pass, computes gradients
 
             # clip gradient norm so very large updates do not destabilize training
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip_norm)
 
-            optimizer.step() # updates weights based on gradients
+            optimizer.step()  # updates weights based on gradients
 
             # computes average loss and running accuracy for training.
             batch_size = label.size(0)
@@ -274,6 +402,12 @@ def main():
 
         # runs evaluation.
         val_loss, val_acc = evaluate(model, val_loader, device)
+
+        # save metrics for plotting later
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+        train_accuracies.append(train_acc)
+        val_accuracies.append(val_acc)
 
         # scheduler uses validation accuracy to decide when to reduce learning rate
         scheduler.step(val_acc)
@@ -311,12 +445,49 @@ def main():
     print("Saved checkpoints:", best_path)
 
     # test best checkpoint on test set
-    checkpoint = torch.load(best_path, map_location=device) # load best model checkpoint back into model, ensures you test the best one.
+    checkpoint = torch.load(best_path, map_location=device)  # load best model checkpoint back into model, ensures you test the best one.
     model.load_state_dict(checkpoint["model_state"])
 
     # evaluates on test set
     test_loss, test_acc = evaluate(model, test_loader, device)
     print(f"Test loss: {test_loss:.4f} acc {test_acc:.4f}")
+
+    # evaluate train/test metrics for the final bar chart
+    train_metrics = evaluate_pose_metrics(
+        model=model,
+        loader=train_eval_loader,
+        device=device,
+        num_classes=4,
+    )
+    test_metrics = evaluate_pose_metrics(
+        model=model,
+        loader=test_eval_loader,
+        device=device,
+        num_classes=4,
+    )
+
+    print("\nTRAINING EVALUATION RESULTS")
+    print(f"Num samples: {train_metrics['num_samples']}")
+    print(f"Accuracy: {train_metrics['accuracy']:.4f}")
+
+    print("\nTRAIN per-class accuracy")
+    label_names = ["Backhand", "Forehand", "Ready_Position", "Serve"]
+    for i, name in enumerate(label_names):
+        print(
+            f"{name}: {train_metrics['class_accuracy'][i]:.4f} "
+            f"({train_metrics['class_correct'][i]}/{train_metrics['class_total'][i]})"
+        )
+
+    print("\nTEST EVALUATION RESULTS")
+    print(f"Num samples: {test_metrics['num_samples']}")
+    print(f"Accuracy: {test_metrics['accuracy']:.4f}")
+
+    print("\nTEST per-class accuracy")
+    for i, name in enumerate(label_names):
+        print(
+            f"{name}: {test_metrics['class_accuracy'][i]:.4f} "
+            f"({test_metrics['class_correct'][i]}/{test_metrics['class_total'][i]})"
+        )
 
     # builds confusion matrix on the predicted-keypoint test set
     evaluate_with_confusion_matrix(
@@ -324,6 +495,22 @@ def main():
         loader=test_loader,
         device=device,
         save_path="evaluation_outputs/stage3_predicted_confusion_matrix.png",
+    )
+
+    # save training/validation curves
+    save_training_curves(
+        train_losses=train_losses,
+        val_losses=val_losses,
+        train_accuracies=train_accuracies,
+        val_accuracies=val_accuracies,
+        save_dir="evaluation_outputs",
+    )
+
+    # save final train vs test accuracy bar chart
+    plot_pose_accuracy_bar_chart(
+        train_acc=train_metrics["accuracy"],
+        test_acc=test_metrics["accuracy"],
+        output_dir="evaluation_outputs",
     )
 
 

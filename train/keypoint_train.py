@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 from torchvision import transforms
+import matplotlib.pyplot as plt
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
@@ -16,6 +17,7 @@ from data.keypoint_dataset import TennisKeypointDataset
 from models.keypoint_detection import KeypointDetectionModel
 from preprocessing.pil_preprocessing import letterbox_resize
 from preprocessing.tensor_preprocessing import KeypointsToHeatmaps
+
 
 
 def get_device():
@@ -156,6 +158,36 @@ def evaluate(model, loader, criterion, device):
     mean_acc = weighted_acc_sum / max(total_count, 1)
     return mean_loss, mean_acc
 
+def plot_keypoint_pck_bar_chart(train_pck, test_pck, output_dir="evaluation_outputs"):
+    """
+    Save a Stage 2 bar chart comparing train vs test PCK accuracy.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    labels = ["Training", "Test"]
+    values = [train_pck, test_pck]
+
+    plt.figure(figsize=(6, 5))
+    bars = plt.bar(labels, values)
+    plt.ylim(0, 1)
+    plt.ylabel("PCK Accuracy")
+    plt.title("Keypoint Detection Model Performance")
+
+    for bar, val in zip(bars, values):
+        plt.text(
+            bar.get_x() + bar.get_width() / 2,
+            val + 0.02,
+            f"{val:.4f}",
+            ha="center"
+        )
+
+    save_path = os.path.join(output_dir, "keypoint_pck_bar_chart.png")
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=200)
+    plt.show()
+    plt.close()
+
+    print(f"Saved keypoint PCK bar chart to: {save_path}")
 
 def train_keypoint_model(args):
     """Train, validate, checkpoint, and test the keypoint detection model.
@@ -215,6 +247,7 @@ def train_keypoint_model(args):
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
+    train_eval_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=False)
 
     device = get_device()
     print("Device:", device)
@@ -333,8 +366,18 @@ def train_keypoint_model(args):
 
     checkpoint = torch.load(best_path, map_location=device)
     model.load_state_dict(checkpoint["model_state"])
+
+    train_loss, train_acc = evaluate(model, train_eval_loader, criterion, device)
     test_loss, test_acc = evaluate(model, test_loader, criterion, device)
-    print(f"Test loss: {test_loss:.5f} | Test accuracy: {test_acc:.5f}")
+
+    print(f"Train loss: {train_loss:.5f} | Train PCK accuracy: {train_acc:.5f}")
+    print(f"Test loss: {test_loss:.5f} | Test PCK accuracy: {test_acc:.5f}")
+
+    plot_keypoint_pck_bar_chart(
+        train_pck=train_acc,
+        test_pck=test_acc,
+        output_dir="evaluation_outputs",
+    )
 
     deploy_payload = {
         "model_state": model.state_dict(),

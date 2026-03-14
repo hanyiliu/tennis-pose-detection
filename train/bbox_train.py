@@ -18,6 +18,9 @@ import kagglehub
 from torch.utils.data import Subset
 from torchvision.ops import complete_box_iou_loss
 
+import numpy as np
+import matplotlib.pyplot as plt
+
 if os.path.basename(os.getcwd()) == "eda":
     os.chdir("..")
 
@@ -114,6 +117,35 @@ def bbox_iou_xyxy(pred, target, eps=1e-7):
     union = p_area + t_area - inter
     return inter / (union + eps)
 
+def compute_iou_xywh(gt_box, pred_box, eps=1e-7):
+    gx1, gy1, gw, gh = gt_box
+    px1, py1, pw, ph = pred_box
+    
+    gx2 = gx1 + gw
+    gy2 = gy1 + gh
+    px2 = px1 + pw
+    py2 = py1 + ph
+    
+    gx1, gx2 = min(gx1, gx2), max(gx1, gx2)
+    gy1, gy2 = min(gy1, gy2), max(gy1, gy2)
+    px1, px2 = min(px1, px2), max(px1, px2)
+    py1, py2 = min(py1, py2), max(py1, py2)
+    
+    ix1 = max(gx1, px1)
+    iy1 = max(gy1, py1)
+    ix2 = min(gx2, px2)
+    iy2 = min(gy2, py2)
+    
+    iw = max(0.0, ix2 - ix1)
+    ih = max(0.0, iy2 - iy1)
+    inter = iw * ih
+
+    g_area = max(0.0, gx2 - gx1) * max(0.0, gy2 - gy1)
+    p_area = max(0.0, px2 - px1) * max(0.0, py2 - py1)
+    
+    union = p_area + g_area - inter
+    return inter / (union + eps)
+
 def ciou_loss_xywh(preds: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     # IoU loss = mean(1 - IoU), where IoU is computed after converting cxcywh -> xyxy
     preds_xyxy = sanitize_xyxy(xywh_to_xyxy(preds))
@@ -157,6 +189,77 @@ def iou_evaluate(model, loader, criterion, device, iou_thresholds=(0.5, 0.75)):
     acc = {thr: correct[thr] / max(n, 1) for thr in iou_thresholds}
     return avg_loss, mean_iou, acc
 
+def evaluate_detection_metrics(model, dataset_for_model, device):
+    """
+      - mean IoU
+      - mean L1 error
+      - AP@0.50
+      - mAP@0.50:0.95
+      - AP by threshold
+    dataset_for_model: (img_tensor, gt_bbox_norm)
+    """
+    model.eval()
+
+    ious = []
+    l1_errors = []
+
+    for i in range(len(dataset_for_model)):
+        img_tensor_i, gt_bbox_norm_i = dataset_for_model[i]
+
+        pred_bbox_norm_i = model(img_tensor_i.unsqueeze(0).to(device))[0].detach().cpu().numpy()
+        pred_bbox_norm_i = np.clip(pred_bbox_norm_i, 0.0, 1.0)
+
+        gt_bbox_norm_i = gt_bbox_norm_i.numpy()
+
+        iou_i = compute_iou_xywh(gt_bbox_norm_i, pred_bbox_norm_i)
+        l1_i = float(np.mean(np.abs(pred_bbox_norm_i - gt_bbox_norm_i)))
+
+        ious.append(iou_i)
+        l1_errors.append(l1_i)
+
+    ious = np.array(ious, dtype=np.float32)
+    l1_errors = np.array(l1_errors, dtype=np.float32)
+
+    iou_thresholds = np.arange(0.50, 0.96, 0.05)
+    ap_by_threshold = {float(t): float(np.mean(ious >= t)) for t in iou_thresholds}
+
+    map_50 = ap_by_threshold[0.5]
+    map_50_95 = float(np.mean(list(ap_by_threshold.values())))
+
+    return {
+        "num_samples": len(ious),
+        "mean_iou": float(np.mean(ious)),
+        "mean_l1": float(np.mean(l1_errors)),
+        "ap_50": map_50,
+        "map_50_95": map_50_95,
+        "ap_by_threshold": ap_by_threshold,
+    }
+
+def plot_map_bar_chart(train_map, test_map, output_dir="evaluation_outputs"):
+    os.makedirs(output_dir, exist_ok=True)
+
+    labels = ["Training", "Test"]
+    values = [train_map, test_map]
+
+    plt.figure(figsize=(6, 5))
+    bars = plt.bar(labels, values)
+    plt.ylim(0, 1)
+    plt.ylabel("mAP@0.50:0.95")
+    plt.title("Bounding Box Model Performance")
+
+    for bar, val in zip(bars, values):
+        plt.text(
+            bar.get_x() + bar.get_width() / 2,
+            val + 0.02,
+            f"{val:.4f}",
+            ha="center"
+        )
+
+    save_path = os.path.join(output_dir, "bbox_mAP_bar_chart.png")
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.show()
+
 def main():
     parser = argparse.ArgumentParser()
     # where the dataset folder is
@@ -198,24 +301,26 @@ def main():
     ])
     
     train_dataset = TennisBBoxDataset(args.root_dir, annotation_files, transform=train_transform)
-    eval_dataset  = TennisBBoxDataset(args.root_dir, annotation_files, transform=eval_transform)
+    eval_dataset = TennisBBoxDataset(args.root_dir, annotation_files, transform=eval_transform)
 
     dataset_size = len(train_dataset)
     train_size = int(dataset_size * args.train_split)
-    val_size   = int(dataset_size * args.val_split)
-    test_size  = dataset_size - train_size - val_size
+    val_size = int(dataset_size * args.val_split)
+    test_size = dataset_size - train_size - val_size
 
     # split indices, not dataset objects, for reproducibility
     g = torch.Generator().manual_seed(args.seed)
     perm = torch.randperm(dataset_size, generator=g).tolist()
 
     train_idx = perm[:train_size]
-    val_idx   = perm[train_size:train_size + val_size]
-    test_idx  = perm[train_size + val_size:]
+    val_idx = perm[train_size:train_size + val_size]
+    test_idx = perm[train_size + val_size:]
 
     train_ds = Subset(train_dataset, train_idx)
-    val_ds   = Subset(eval_dataset,  val_idx)
-    test_ds  = Subset(eval_dataset,  test_idx)
+    val_ds = Subset(eval_dataset, val_idx)
+    test_ds = Subset(eval_dataset, test_idx)
+    
+    train_eval_ds = Subset(eval_dataset, train_idx)
     
     # DataLoader does:
     # batching- returns batches instead of single samples
@@ -251,11 +356,17 @@ def main():
     best_val_mean_iou = -1.0
     os.makedirs("checkpoints", exist_ok=True)
     
+    train_losses = []
+    train_accs = []
+    val_losses = []
+    val_accs = []
     
     for epoch in range(1, args.epochs + 1):
         model.train()
         total_loss = 0.0
         n = 0
+        train_correct_50 = 0
+        train_sum_iou = 0.0
         
         for imgs, bboxes in train_loader:
             imgs = imgs.to(device)
@@ -276,12 +387,27 @@ def main():
             total_loss += loss.item() * bs
             n += bs
             
+            with torch.no_grad():
+                preds_clamped = preds.clamp(0,1)
+                bboxes_clamped = bboxes.clamp(0,1)
+                preds_xyxy = sanitize_xyxy(xywh_to_xyxy(preds_clamped))
+                bboxes_xyxy = sanitize_xyxy(xywh_to_xyxy(bboxes_clamped))
+                ious = bbox_iou_xyxy(preds_xyxy, bboxes_xyxy)
+                train_sum_iou += ious.sum().item()
+                train_correct_50 += (ious >= 0.5).sum().item()
+            
         # average loss over all training samples for this epoch
         train_loss = total_loss / max(n, 1)
+        train_acc_50 = train_correct_50 / max(n, 1)
         # runs model on validation set
         val_loss, val_mean_iou, val_acc = iou_evaluate(model, val_loader, criterion, device)
 
         scheduler.step(val_loss)
+        
+        train_losses.append(train_loss)
+        train_accs.append(train_acc_50)
+        val_losses.append(val_loss)
+        val_accs.append(val_acc[0.5])
 
         print(f"Epoch {epoch:02d}/{args.epochs}  train_loss: {train_loss:.5f}  val_loss: {val_loss:.5f}  val_acc@0.50: {val_acc[0.5]*100:.2f}% val_acc@0.75: {val_acc[0.75]*100:.2f}%")
         
@@ -297,6 +423,29 @@ def main():
     print("\n Test mean IoU:", test_mean_iou)
     print(f"accuracy@0.50: {test_acc[0.5]*100} %")
     print(f"accuracy@0.75: {test_acc[0.75]*100} %")
+    
+    train_metrics = evaluate_detection_metrics(model, train_eval_ds, device)
+    test_metrics = evaluate_detection_metrics(model, test_ds, device)
+    
+    print("\nTRAINING EVALUATION RESULTS")
+    print(f"Num samples: {train_metrics['num_samples']}")
+    print(f"Mean IoU: {train_metrics['mean_iou']:.4f}")
+    print(f"Mean normalized L1 error: {train_metrics['mean_l1']:.4f}")
+    print(f"AP@0.50: {train_metrics['ap_50']:.4f}")
+    print(f"mAP@0.50:0.95: {train_metrics['map_50_95']:.4f}")
+
+    print("\nTEST EVALUATION RESULTS")
+    print(f"Num samples: {test_metrics['num_samples']}")
+    print(f"Mean IoU: {test_metrics['mean_iou']:.4f}")
+    print(f"Mean normalized L1 error: {test_metrics['mean_l1']:.4f}")
+    print(f"AP@0.50: {test_metrics['ap_50']:.4f}")
+    print(f"mAP@0.50:0.95: {test_metrics['map_50_95']:.4f}")
+    
+    plot_map_bar_chart(
+        train_map=train_metrics["map_50_95"],
+        test_map=test_metrics["map_50_95"],
+        output_dir="evaluation_outputs"
+    )
     
 if __name__ == "__main__":
     main()
