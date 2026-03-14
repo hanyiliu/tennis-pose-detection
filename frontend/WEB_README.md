@@ -1,14 +1,14 @@
 # Web Frontend Deployment of Tennis Pose Detection Model
 
 ## Overview
-This deployment will be done on web using Angular. The application will allow user to upload any image, of which we then pass as a REST API request to a locally hosted Python server through FastEndpoint that will process this and return model results, which is also overlayed on top of the input image. 
+This deployment will be done on web using Angular. The application will allow user to upload any image, of which we then pass as a REST API request to a locally hosted Python server through FastAPI that will process this and return model results, which is also overlayed on top of the input image. 
 
 ## Frontend Implementation
 The application will have one page. Upon landing, user has option to upload picture file. Once uploaded, we make a FastEndpoint request to locally hosted Python server, which returns model values and overlayed image with predictions.
 
 ### Frontend Main Page
 The main page will be built of the following:
-- Top navbar, which has on left, Tennis Pose Detection title, then on right the section titles Prediction, Stage One, Stage Two, Stage Three. The section titles are hidden when no image is uploaded. (`navbar` component)
+- Top navbar, which has on left, Tennis Pose Detection title. (`navbar` component)
 - When no uploaded image:
     - Upload image button centered on app. Only navbar, upload image button, and footer are visible when no images are uploaded.  (`import-image-button` component)
 - When uploaded image, the below are all shown, which all fall into the `model-predictions` component:

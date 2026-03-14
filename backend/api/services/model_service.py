@@ -15,7 +15,6 @@ from backend.api.utils.image_outputs import (
 )
 from inference.inference import InferencePipeline
 from models.bbox_detection import BBoxDetectionModel
-from models.keypoint_attention_detection import KeypointAttentionDetectionModel
 from models.keypoint_detection import KeypointDetectionModel
 from models.pose_classification import PoseClassificationModel
 from preprocessing.image_preprocessing import convert_image_to_tensor
@@ -38,7 +37,7 @@ class ModelService:
 
         self.bbox_model = BBoxDetectionModel().to(self.device)
         self.keypoint_model = KeypointDetectionModel(num_keypoints=18).to(self.device)
-        self.pose_model = None
+        self.pose_model = PoseClassificationModel()
         self.label_names = POSE_KEYS
 
         e2e_candidates = self._e2e_candidate_paths(settings.pose_model_path)
@@ -129,11 +128,7 @@ class ModelService:
                 raise ValueError(f"Invalid keypoint_model_state in e2e checkpoint: {checkpoint_path}")
 
             num_keypoints = 18
-            has_attention_keys = any(key.startswith("encoder.stem.") for key in keypoint_state.keys())
-            if has_attention_keys:
-                self.keypoint_model = KeypointAttentionDetectionModel(num_keypoints=num_keypoints).to(self.device)
-            else:
-                self.keypoint_model = KeypointDetectionModel(num_keypoints=num_keypoints).to(self.device)
+            self.keypoint_model = KeypointDetectionModel(num_keypoints=num_keypoints).to(self.device)
             self.keypoint_model.load_state_dict(keypoint_state)
 
             self.keypoint_image_size = (
