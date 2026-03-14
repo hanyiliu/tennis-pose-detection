@@ -250,7 +250,7 @@ def main():
             total_count += batch_size
             correct += (logits.argmax(dim=1) == label).sum().item()
         
-        #epoch metrics
+        # epoch metrics
         train_loss = total_loss / max(total_count, 1)
         train_acc = correct / max(total_count, 1)
 
