@@ -12,7 +12,7 @@ We use FastAPI here to link communication between frontend demo and backend mode
 
     - Stage Two
         - keypoint_positions: number[][] ([[Keypoint 1 x, Keypoint 1 y, Keypoint 1 visibility], [Keypoint 2 x, Keypoint 2 y, Keypoint 2 visibility], ..., [Keypoint 18 x, Keypoint 18 y, Keypoint 18 visibility]])
-        - keypoint_aggregated_heatmap_url: string (Image of all keypoint heatmaps displayed against black background.)
+        - keypoint_aggregated_heatmap: string (Image of all keypoint heatmaps displayed against black background.)
         - keypoint_cropped_image: image (Image of cropped image with keypoints overlayed)
 
     - Stage Three

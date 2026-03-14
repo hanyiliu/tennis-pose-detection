@@ -137,7 +137,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
 
     # model hyperparameters
-    parser.add_argument("--hidden_dim", type=int, default=256)
+    parser.add_argument("--hidden_dim", type=int, default=512)
     parser.add_argument("--dropout", type=float, default=0.25)
     parser.add_argument("--visibility_threshold", type=float, default=0.0)
 
@@ -250,7 +250,7 @@ def main():
             total_count += batch_size
             correct += (logits.argmax(dim=1) == label).sum().item()
         
-        #epoch metrics
+        # epoch metrics
         train_loss = total_loss / max(total_count, 1)
         train_acc = correct / max(total_count, 1)
 

@@ -23,7 +23,7 @@ class PoseClassificationModel(nn.Module):
         self,
         num_keypoints: int = 18,
         num_classes: int = 4,
-        hidden_dim: int = 256,
+        hidden_dim: int = 512,
         dropout: float = 0.25,
         visibility_threshold: float = 0.0,
     ):

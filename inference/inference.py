@@ -1,6 +1,7 @@
-from preprocessing.image_preprocessing import convert_image_to_tensor
 from preprocessing.pil_preprocessing import crop_pil, letterbox_resize, norm_bbox_to_xyxy_pixels
 from preprocessing.tensor_preprocessing import heatmaps_to_keypoints, normalize_keypoints_xy
+from preprocessing.image_preprocessing import convert_image_to_tensor
+from torchvision import transforms
 
 
 class InferencePipeline:
@@ -24,8 +25,11 @@ class InferencePipeline:
         pose_device = next(self.pose_detection.parameters()).device
 
         # image to tensor for bounding box detection (stage 1)
-        bbox_resized_img = letterbox_resize(pil_image, size=self.bbox_image_size)
-        tensor = convert_image_to_tensor(bbox_resized_img).to(bbox_device)
+        bbox_transform = transforms.Compose([
+            transforms.Resize(self.bbox_image_size),
+            transforms.ToTensor(),
+        ])
+        tensor = bbox_transform(pil_image.copy()).to(bbox_device)
         bbox = self.bbox_detection(tensor.unsqueeze(0)).squeeze(0)
         image_width, image_height = pil_image.size
         bbox_xyxy = norm_bbox_to_xyxy_pixels(bbox, image_width, image_height)

@@ -21,7 +21,7 @@ class Settings(BaseSettings):
 
     bbox_model_path: str = "exports/bbox_best.pt"
     keypoint_model_path: str = "exports/keypoint_best_state_dict.pt"
-    pose_model_path: str = "exports/pose_best.pt"
+    pose_model_path: str = "exports/colab_e2e_best_2.pt"
 
     device: str = _default_device()
     max_upload_mb: int = 10

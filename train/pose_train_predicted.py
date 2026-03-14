@@ -4,6 +4,7 @@ import os
 import argparse
 import random
 import numpy as np
+import sys
 
 import torch
 import torch.nn as nn
@@ -11,6 +12,10 @@ from torch.utils.data import DataLoader, random_split
 
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix, classification_report, ConfusionMatrixDisplay
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from data.pose_predicted_dataset import pose_predicted_dataset
 from models.pose_classification import PoseClassificationModel
