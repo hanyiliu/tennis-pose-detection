@@ -121,6 +121,14 @@ These are intentional. Do not "fix" them.
 3. **Lowercase label names.** The checkpoint ships `['Backhand', 'Forehand', 'Ready_Position',
    'Serve']`. iOS reads the normalized `backhand`, `forehand`, `ready_position`, `serve` from
    `TPDLabels.json`, matching the backend's normalization. Never hardcode the order.
+4. **Resampling: PIL port, and the one place it stops.** `TPDResample` ports Pillow's resampler
+   because no `CIFilter` reproduces PIL's downscale-scaled filter support —
+   `CILanczosScaleTransform` moved the stage-1 crop rect by a median of 34 px (max 89, 0/24
+   frames matching). Stage 1 is now byte-identical to `Image.resize(..., BILINEAR)`, 24/24 rects.
+   Stage 2 matches `letterbox_resize` byte for byte only while both crop sides are under 512 px;
+   past that `PIL.thumbnail`'s `reducing_gap=2.0` box-reduces first and Swift does not, leaving
+   mean |delta| 0.21/255 (worst pixel 22/255) on the 128x128 input. Porting `Image.reduce` is
+   the open item. Never put a `CIFilter` back.
 
 ## Privacy keys
 
