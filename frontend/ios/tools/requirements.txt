@@ -1,0 +1,21 @@
+# Core ML export toolchain.
+#
+# The pins are deliberately old because the development Mac is Intel (x86_64):
+# PyTorch stopped publishing macOS x86_64 wheels after 2.2.x, and torch 2.2.2 was
+# built against the numpy 1.x C ABI. So the whole stack is anchored to what that
+# platform can actually install:
+#
+#   python 3.9  (last CPython with torch 2.2.2 x86_64 macOS wheels in this env)
+#   torch 2.2.2 -> torchvision 0.17.2 (matched release pair)
+#   numpy < 2   (torch 2.2.2 predates the numpy 2.0 ABI break)
+#   coremltools 8.x (supports torch 2.2 tracing; 9.x requires a newer torch)
+#
+# On Apple Silicon these floors are not binding -- newer torch/coremltools work
+# fine and produce the same packages -- but keep the pins so the export is
+# reproducible across both machines.
+
+torch==2.2.2
+torchvision==0.17.2
+numpy<2
+coremltools>=8.0,<9.0
+pillow>=9.0
