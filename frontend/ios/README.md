@@ -35,9 +35,12 @@ Steps 1 and 2 need the user's password and an App Store session; they cannot be 
 
 | Tool | Version | Notes |
 |---|---|---|
-| Xcode | 16+ | iOS 17.0 deployment target, Swift 6 language mode |
+| Xcode | 16+ | iOS 17.0 deployment target (hard floor, see below), Swift 6 language mode |
 | XcodeGen | 2.46+ | `brew install xcodegen` |
 | Python | 3.9 | Export only. This is an Intel Mac; see below. |
+
+`make build` targets the `iPhone 16` simulator (`SIM_DEVICE`), which is in Xcode 16's default device
+set; override with `make build SIM_DEVICE='iPhone 16 Pro'` if you run a different one.
 
 ## Build
 
@@ -60,24 +63,46 @@ no spec edit; just re-run `make generate`.
 Swift check that runs on this machine today and it catches every syntax error. It does **not**
 type-check, so SwiftUI/AVFoundation API misuse survives it and is only caught by a real iOS build.
 
+Because it is the only gate, **finding zero Swift files is a failure, not a pass**: `make lint`
+exits non-zero if `TPD/` or `TPDTests/` is missing or contains no `.swift`, so a renamed directory
+cannot masquerade as a clean run.
+
 ## Model artifacts
 
-**`.mlpackage` bundles are git-ignored and are never committed.** They are ~35 MB of binary
-weights; the repo has never used Git LFS and this keeps every PR text-only.
+**`frontend/ios/TPD/Models/` is the one and only model directory.** `tools/export_coreml.py`
+defaults to it and the `MODELS_DIR` in the Makefile points at it. Never add a second models
+directory anywhere under `TPD/`, however nested: the whole tree is inside the app target's
+`sources:` glob, so a duplicate silently bundles two divergent copies of the JSON sidecars into the
+app and the loser is whichever one the copy phase happens to write last.
 
 ```bash
 make venv     # creates ../../.venv-coreml (python3.9)
-make export   # checkpoint -> TPD/Resources/Models/*.mlpackage + JSON sidecars
+make export   # checkpoint -> TPD/Models/*.mlpackage + JSON sidecars
 make parity   # torch vs Core ML numeric parity at fp16 tolerances
 ```
 
-`make export` regenerates them from `exports/colab_e2e_best_2.pt`, which *is* committed, and also
-emits `TPDLabels.json` and `TPDModelSpec.json` so the Swift side never hardcodes class order or
-input sizes. **Run `make export` before `make build`** — a clone has no models until you do.
+**`.mlpackage` bundles are git-ignored and never committed** — ~35 MB of binary weights, and the
+repo has never used Git LFS. `make export` regenerates them from `exports/colab_e2e_best_2.pt`,
+which *is* committed. **Run `make export` before `make build`** — a clone has no `.mlpackage` until
+you do.
+
+**`TPDLabels.json` and `TPDModelSpec.json` *are* committed.** They are a few hundred bytes of text,
+they document the contract Swift reads for class order and input sizes, and they let the project
+build and lint without a 35 MB export. Re-running `make export` is expected to overwrite them; if
+that produces a diff, the checkpoint drifted from the committed contract and the diff is the alarm.
 
 The pinned stack is `torch==2.2.2`, `torchvision==0.17.2`, `numpy<2`, `coremltools>=8,<9` on
 python3.9. PyTorch publishes no macOS **x86_64** wheels above 2.2.x, so on this Intel host those
 pins are the only combination that resolves. Do not bump them here.
+
+### The iOS 17 floor is a two-sided constraint
+
+The app pins `IPHONEOS_DEPLOYMENT_TARGET = 17.0` (`project.yml`), so **every exported `.mlpackage`
+must be built with `minimum_deployment_target = ct.target.iOS17`**. `export_coreml.py` hardcodes
+exactly that; it must not auto-select the newest target coremltools happens to know about. A package
+emitted for iOS 18 still loads on a newer simulator runtime and then fails at `MLModel(contentsOf:)`
+on a real iOS 17 device — the worst possible place to discover it. If you ever raise the deployment
+target, raise both sides in the same change.
 
 ## Decided divergences from the Python backend
 
