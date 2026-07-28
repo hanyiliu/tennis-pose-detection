@@ -58,8 +58,12 @@ final class VideoFileFrameSource: NSObject, FrameSource, @unchecked Sendable {
     /// its target and the run loop retains it, so a live link would keep `self`
     /// alive forever and `deinit` would never run. `start()` builds a fresh one.
     func stop() {
-        lifecycle.stop()
-        let stopped = lifecycle.latest
+        // One acquisition, and the token it bumped comes straight back out of
+        // it. Reading `lifecycle.latest` on a second line instead would leave a
+        // window in which a begin() could bump the token again, handing this
+        // teardown the token of the run that just started — the guard below
+        // would then compare equal and tear that new run down.
+        let stopped = lifecycle.stop()
         DispatchQueue.main.async { [self] in
             // Unlike the camera's serial session queue, this teardown and
             // `startOnMain` reach main by different routes, so nothing orders

@@ -86,6 +86,10 @@ final class FrameSourceLifecycle: @unchecked Sendable {
     /// The newest token, live or not. A teardown queued by `stop()` compares it
     /// on arrival and stands down if a `start()` has since superseded that stop,
     /// which is what makes the two safe to queue on unordered executors.
+    ///
+    /// Compare it only against the value `stop()` **returned**. Deriving the
+    /// teardown's own token by reading this property a second time reintroduces
+    /// the race the comparison exists to close — see `stop()`.
     var latest: UInt64 { lock.withLock { token } }
 
     /// Hands a frame to the live stream; a no-op once stopped, which is what
@@ -94,13 +98,29 @@ final class FrameSourceLifecycle: @unchecked Sendable {
         lock.withLock { continuation }?.yield(frame)
     }
 
-    /// Finishes the live stream and invalidates any start attempt still in
-    /// flight. Idempotent, callable from any thread.
-    func stop() {
-        lock.withLock { () -> FrameStream.Continuation? in
-            defer { continuation = nil; token &+= 1 }
-            return continuation
-        }?.finish()
+    /// Finishes the live stream, invalidates any start attempt still in flight,
+    /// and returns the token this stop now owns. Idempotent, callable from any
+    /// thread.
+    ///
+    /// **The token comes back from the same lock acquisition that bumped it**,
+    /// and that is the whole point of the return value. A producer whose
+    /// teardown runs asynchronously has to know *which* run it was asked to tear
+    /// down, and recovering that by reading `latest` afterwards is a second
+    /// acquisition with a gap in front of it: a `begin()` landing in the gap
+    /// bumps the token again, the teardown reads the **new** run's token, its
+    /// stand-down check then compares equal, and it tears down the run that just
+    /// started — precisely the stop/start race the check was added to close,
+    /// moved rather than fixed. One acquisition leaves no gap to land in.
+    @discardableResult
+    func stop() -> UInt64 {
+        let (live, stopped) = lock.withLock { () -> (FrameStream.Continuation?, UInt64) in
+            let previous = continuation
+            continuation = nil
+            token &+= 1
+            return (previous, token)
+        }
+        live?.finish()
+        return stopped
     }
 }
 
