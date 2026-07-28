@@ -105,12 +105,20 @@ CLASS_TIE_GAP = 3e-1
 #   from above -- an argmax flip needs the top two to swap, i.e. the drifts on them to sum
 #     past CLASS_TIE_GAP. Both are bounded by this constant, so PROB_TOL <= CLASS_TIE_GAP/2
 #     = 1.5e-01 is exactly what makes "gradeable inputs never flip" hold arithmetically.
-# It was 3e-01, that ceiling doubled, and an injected +0.20 on one class passed the whole
-# gate. At 1.5e-01 the default config catches +0.142 and misses +0.141: the floor is
-# PROB_TOL minus whatever drift already sits on that class, so a wider sweep finds a little
-# more (40 seeds catch +0.140). Under it a stage-3-only regression is still invisible unless
-# it moves an argmax -- shrinking that residue further means lowering CLASS_TIE_GAP too,
-# which costs gradeable inputs, so it is documented rather than pushed.
+# It was 3e-01, whose real detection floor measured +0.2919, so an injected +0.20 passed the
+# whole gate. At 1.5e-01 the floor is PROB_TOL minus whatever drift already sits on the class
+# the regression lands on, which makes it TARGET-DEPENDENT rather than a single number:
+# independently measured at +0.142 onto the runner-up and +0.1438 onto the argmax, i.e. the
+# range ~0.142-0.144 on the default config (a 40-seed sweep catches +0.140).
+#
+# TWO residual blind spots, both real, stated plainly so nobody reads this gate as total:
+#   1. On GRADEABLE inputs a stage-3-only regression under ~0.14 that never moves an argmax is
+#      invisible. Shrinking that means lowering CLASS_TIE_GAP too, which costs gradeable
+#      inputs, so it is documented rather than pushed.
+#   2. On inputs the gate EXCLUDES from grading, the probability blind spot is UNBOUNDED in
+#      magnitude, not ~0.14 -- nothing about their probabilities is checked at all. The
+#      defence is the gradeable-fraction floor below, which fails the run as vacuous when too
+#      few inputs are admissible; it is not a bound on what an excluded input may do.
 PROB_TOL = 1.5e-1
 # Normalized xywh out of stage 1. Measured 3.1e-04.
 BBOX_TOL = 5e-3
