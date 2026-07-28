@@ -75,18 +75,18 @@ Plain fp16 broke the fused graph in two ways. Both were reproduced at the MIL le
    pixel. Fixed by splitting the index with integer ops before any float cast — the row and column
    that do get cast are 0..127, which fp16 holds exactly.
 2. **fp16 overflowed in the stage-3 body center.** Visibility here is the raw max logit, so
-   `vis.sum()` is often negative (measured −40.6 on a black crop). `clamp_min(1e-6)` then makes the
-   divisor 1e-6 and `center = (xy*vis).sum() / vis_sum` reaches ~1e6, past the fp16 ceiling of
-   65504 — `centered_xy` became inf/nan and fed the classifier. Fixed by running everything
-   downstream of the argmax in fp32 via `ct.transform.FP16ComputePrecision(op_selector=…)`.
+   `vis.sum()` is often negative (measured −40.6 on a black crop, −4.4 on mid-gray).
+   `clamp_min(1e-6)` then makes the divisor 1e-6 and `center = (xy*vis).sum() / vis_sum` reaches
+   3.5e7, past the fp16 ceiling of 65504 — `centered_xy` went inf/nan into the classifier. Fixed by
+   running everything downstream of the argmax in fp32 via `FP16ComputePrecision(op_selector=…)`.
 
 The earlier note in this file blamed "near-flat heatmap peaks" with a median top-1/top-2 logit gap
 of 0.10. That diagnosis was wrong: the peaks are fine, the index cast and the overflow were not.
-Keeping the U-Net in fp16 costs 0.5 MB against the old all-fp16 build (TPDPoseNet 29.8 → 30.3 MB,
-34.0 → 34.5 MB total) rather than the 68 MB an all-fp32 export needs. Measured here on CPU compute
-units over 20 deterministic inputs (black / white / two flat grays / 10 random 128×128 crops /
-6 random full frames), exported keypoints are **bit-identical** to the torch pipeline on all 360
-channels, `max|Δprob| = 6.3e-3`, and the predicted class agrees 20/20.
+The fp32 head costs 0.5 MB against the old all-fp16 build (TPDPoseNet 29.8 → 30.3 MB, 34.0 → 34.5
+MB total) rather than the 68 MB an all-fp32 export needs. Measured here on CPU compute units over
+20 deterministic inputs (black / white / two flat grays / 10 random 128×128 crops / 6 random full
+frames), with the same pixels entering both stacks, exported keypoints are **bit-identical** to the
+torch pipeline on all 360 channels, `max|Δprob| = 6.3e-3`, and the predicted class agrees 20/20.
 
 Stage 1 stays plain fp16. Its bbox differs from torch by at most `3.3e-4` normalized (≈0.2 px at
 640 px wide), which is sub-pixel, but `norm_bbox_to_xyxy_pixels` rounds to integers and that
