@@ -1,28 +1,23 @@
 //  CameraFrameSource.swift
-//  Device frame source: AVCaptureSession -> AsyncStream<VideoFrame>.
-//
-//  Runs on hardware only. In the Simulator `AVCaptureDevice.default` returns
-//  nil, which is why nothing here force-unwraps a device and why
-//  `FrameSourceFactory` picks `VideoFileFrameSource` there instead.
+//  Device frame source: AVCaptureSession -> AsyncStream<VideoFrame>. Hardware
+//  only — in the Simulator `AVCaptureDevice.default` returns nil, which is why
+//  nothing here force-unwraps a device and why `FrameSourceFactory` picks
+//  `VideoFileFrameSource` there.
 
 import AVFoundation
 
 final class CameraFrameSource: NSObject, FrameSource, @unchecked Sendable {
-    /// Portrait. iOS 17 replaced `AVCaptureConnection.videoOrientation` (now
-    /// deprecated) with a rotation angle in degrees, counter-clockwise from the
-    /// sensor's native landscape-right. 90° is portrait, which is the only
-    /// orientation this app supports (`UISupportedInterfaceOrientations`).
+    /// iOS 17 replaced the deprecated `AVCaptureConnection.videoOrientation`
+    /// with a rotation angle in degrees, counter-clockwise from the sensor's
+    /// native landscape-right. 90° is portrait — the only orientation this app
+    /// supports (`UISupportedInterfaceOrientations`).
     private static let portraitRotationAngle: CGFloat = 90
 
-    let frames: FrameStream
-    private let continuation: FrameStream.Continuation
-
-    /// `@unchecked Sendable` rests on these two invariants, both enforced by
-    /// `dispatchPrecondition` below:
-    ///   * `session`, `output` and `isConfigured` are touched only on
-    ///     `sessionQueue`;
-    ///   * sample buffers arrive only on `sampleQueue`, and the only thing that
-    ///     path touches is `continuation`, which is `Sendable` by itself.
+    /// `@unchecked Sendable` rests on two invariants, both enforced by
+    /// `dispatchPrecondition` below: `session`, `output` and `isConfigured` are
+    /// touched only on `sessionQueue`; sample buffers arrive only on
+    /// `sampleQueue` and touch nothing but `lifecycle`, which locks internally.
+    private let lifecycle = FrameSourceLifecycle()
     private let session = AVCaptureSession()
     private let output = AVCaptureVideoDataOutput()
     private let sessionQueue = DispatchQueue(label: "com.hanyi.TPD.camera.session")
@@ -32,43 +27,49 @@ final class CameraFrameSource: NSObject, FrameSource, @unchecked Sendable {
 
     init(position: AVCaptureDevice.Position = .back) {
         self.position = position
-        (frames, continuation) = FrameStream.makeLatestWins()
         super.init()
     }
 
-    deinit {
-        continuation.finish()
-    }
+    deinit { lifecycle.stop() }
 
     // MARK: - Lifecycle
 
-    func start() async throws {
+    /// Returns the stream for this run; a stop/start cycle vends a new one.
+    func start() async throws -> FrameStream {
+        let (stream, token) = lifecycle.begin()
         try await requestAccess()
+        // The permission prompt can sit on screen indefinitely; a stop() during
+        // it must win rather than be overwritten by the work queued behind it.
+        guard lifecycle.isCurrent(token) else { return stream }
         try await withCheckedThrowingContinuation { (resume: CheckedContinuation<Void, Error>) in
             sessionQueue.async { [self] in
+                // Re-checked here too: stop()'s teardown uses this same queue
+                // and may land either side of this block, so intent decides.
+                guard lifecycle.isCurrent(token) else {
+                    resume.resume()
+                    return
+                }
                 do {
                     try configureIfNeeded()
                     // Re-attached on every start because `stop()` detaches it to
                     // break the session -> output -> self reference cycle.
                     output.setSampleBufferDelegate(self, queue: sampleQueue)
-                    if !session.isRunning {
-                        session.startRunning()
-                    }
+                    if !session.isRunning { session.startRunning() }
                     resume.resume()
                 } catch {
                     resume.resume(throwing: error)
                 }
             }
         }
+        return stream
     }
 
-    /// Idempotent, and safe to call from any thread. Parks the session without
-    /// finishing the stream, so a later `start()` resumes into the same stream.
+    /// Idempotent and safe from any thread: records the stop intent
+    /// synchronously (what a parked `start()` re-reads), then parks the session.
     func stop() {
+        lifecycle.stop()
         sessionQueue.async { [self] in
-            if session.isRunning {
-                session.stopRunning()
-            }
+            if session.isRunning { session.stopRunning() }
             output.setSampleBufferDelegate(nil, queue: nil)
         }
     }
@@ -80,8 +81,7 @@ final class CameraFrameSource: NSObject, FrameSource, @unchecked Sendable {
         case .authorized:
             return
         case .notDetermined:
-            // Presents the system prompt; the Info.plist string is
-            // NSCameraUsageDescription.
+            // Presents the system prompt (Info.plist NSCameraUsageDescription).
             guard await AVCaptureDevice.requestAccess(for: .video) else {
                 throw FrameSourceError.cameraAccessDenied
             }
@@ -121,11 +121,11 @@ final class CameraFrameSource: NSObject, FrameSource, @unchecked Sendable {
         session.addInput(input)
 
         // Latest-frame-wins, first line of defence: never hand the delegate a
-        // frame that is already stale because inference ran long. The stream's
+        // frame already stale because inference ran long. The stream's
         // `.bufferingNewest(1)` policy is the second.
         output.alwaysDiscardsLateVideoFrames = true
         // 32BGRA is what CoreImage and Core ML both consume without a second
-        // conversion; the capture pipeline does the YUV->BGRA step in hardware.
+        // conversion; capture does the YUV->BGRA step in hardware.
         output.videoSettings = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
         ]
@@ -138,8 +138,8 @@ final class CameraFrameSource: NSObject, FrameSource, @unchecked Sendable {
             if connection.isVideoRotationAngleSupported(Self.portraitRotationAngle) {
                 connection.videoRotationAngle = Self.portraitRotationAngle
             }
-            // Mirror the selfie camera so the preview matches what the user
-            // expects; the engine sees the same pixels the user sees.
+            // Mirror the selfie camera to match what the user expects; the
+            // engine sees the same pixels the user sees.
             if position == .front, connection.isVideoMirroringSupported {
                 connection.automaticallyAdjustsVideoMirroring = false
                 connection.isVideoMirrored = true
@@ -160,9 +160,9 @@ extension CameraFrameSource: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         // Yielding retains the buffer into the stream's one-slot store, so it
         // outlives this callback and cannot be recycled by the capture pool
-        // underneath the consumer. Exactly one frame is ever held back, which is
-        // why the pool cannot starve.
-        continuation.yield(VideoFrame(pixelBuffer: pixelBuffer,
-                                      time: CMSampleBufferGetPresentationTimeStamp(sampleBuffer)))
+        // under the consumer. Only one frame is held back, so the pool cannot
+        // starve. A frame arriving after stop() is dropped on the floor.
+        lifecycle.yield(VideoFrame(pixelBuffer: pixelBuffer,
+                                   time: CMSampleBufferGetPresentationTimeStamp(sampleBuffer)))
     }
 }

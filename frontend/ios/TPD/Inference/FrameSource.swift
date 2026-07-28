@@ -1,74 +1,119 @@
 //  FrameSource.swift
-//  The one contract every frame producer implements.
-//
-//  Two implementations exist: `CameraFrameSource` on device and
-//  `VideoFileFrameSource` in the Simulator, which has no camera at all
+//  The one contract every frame producer implements: `CameraFrameSource` on
+//  device, `VideoFileFrameSource` in the Simulator, which has no camera at all
 //  (`AVCaptureDevice.default(...)` returns nil there). Both hand out the same
-//  `AsyncStream<VideoFrame>`, so the preview and the Core ML engine see an
-//  identical frame sequence in both environments and nothing downstream has to
-//  know which one is running.
+//  `AsyncStream<VideoFrame>`, so nothing downstream knows which is running.
 
 import CoreMedia
 import CoreVideo
+import Foundation
 
 /// A single frame on its way from a producer to the preview and the engine.
 ///
-/// Why this wraps the pixel buffer instead of the stream carrying
+/// Why this wraps the pixel buffer rather than the stream carrying
 /// `CVPixelBuffer` directly: the SDK marks `CVBuffer` `@_nonSendable`, so
 /// `AsyncStream<CVPixelBuffer>` is itself non-`Sendable` and cannot cross the
-/// isolation boundary between the capture queue and the consuming task under
-/// Swift 6 strict concurrency. Verified against the macOS SDK on this host:
-///
-///     error: conformance of 'CVBuffer' to 'Sendable' is unavailable
-///     note: conformance ... has been explicitly marked unavailable here
-///
-/// The handover really is safe — a producer retains the buffer, yields it, and
-/// never touches it again, so ownership transfers with the value. That is
-/// precisely what `@unchecked Sendable` is for. Do not "simplify" this back to
-/// a bare `CVPixelBuffer`; it will not compile in Swift 6 language mode.
+/// boundary between the capture queue and the consuming task under Swift 6
+/// ("conformance of 'CVBuffer' to 'Sendable' is unavailable", verified against
+/// the macOS SDK here). The handover really is safe: a producer retains the
+/// buffer, yields it and never touches it again, so ownership transfers with
+/// the value. Do not "simplify" this back to a bare `CVPixelBuffer`.
 struct VideoFrame: @unchecked Sendable {
-    /// 32BGRA pixel buffer, already rotated to portrait by the producer.
+    /// 32BGRA, already rotated upright by the producer: the camera path turns
+    /// the sensor's landscape output 90° to portrait, the file path bakes in the
+    /// track's `preferredTransform`. Both therefore hand the overlay and the
+    /// engine one coordinate space — geometry computed against one source's
+    /// frames is valid against the other's.
     let pixelBuffer: CVPixelBuffer
-    /// Presentation timestamp, in the producer's own timebase. Only differences
-    /// between frames from the same source are meaningful.
+    /// Presentation timestamp in the producer's own timebase; only differences
+    /// within one source are meaningful.
     let time: CMTime
 }
 
 /// The single stream type both display and inference consume.
 typealias FrameStream = AsyncStream<VideoFrame>
 
-extension AsyncStream where Element == VideoFrame {
-    /// Builds the frame stream with the project-wide **latest-frame-wins**
-    /// policy, so the buffering decision lives in exactly one place.
+/// The stop/start bookkeeping both producers share. It touches no AVFoundation,
+/// so the whole lifecycle can be driven by a fake producer on any platform.
+///
+/// **One stream per run.** A single stored stream cannot work: cancelling the
+/// consuming task terminates that stream for good, after which every `yield` is
+/// silently dropped — a source vending the same stream from a later `start()`
+/// would deliver nothing, forever, with no error anywhere. `begin()` opens a
+/// fresh one, `stop()` finishes it.
+///
+/// **Intent survives suspension.** `start()` awaits real work — a permission
+/// prompt the user may leave on screen indefinitely, an asset load — and a
+/// `stop()` landing during that await has to win. It is recorded here
+/// synchronously, as a token bump, so start work resuming behind it re-checks
+/// `isCurrent(_:)` and declines to commit.
+final class FrameSourceLifecycle: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: FrameStream.Continuation?
+    private var token: UInt64 = 0
+
+    /// Opens the stream for a new start attempt, finishing whatever a previous
+    /// run left behind, and returns the token identifying this attempt.
     ///
-    /// `.bufferingNewest(1)` is load-bearing. Inference is far slower than
-    /// capture (30–60 fps in, one three-stage pass out), and the default
-    /// `.unbounded` policy would let the producer pile up every frame the
-    /// consumer failed to keep up with: unbounded memory growth plus an overlay
-    /// that drifts further behind reality the longer the app runs. With a
-    /// one-slot buffer a new frame simply replaces the pending one, so a
-    /// consumer that wakes up late always gets the most recent frame and the
-    /// backlog is structurally impossible. PR7's `isInferring` gate is an
-    /// additional, cheaper filter on top of this — it is not a substitute, and
-    /// this policy must stay bounded even after that gate exists.
-    static func makeLatestWins() -> (stream: FrameStream, continuation: FrameStream.Continuation) {
-        AsyncStream.makeStream(of: VideoFrame.self, bufferingPolicy: .bufferingNewest(1))
+    /// `.bufferingNewest(1)` is the project-wide **latest-frame-wins** policy,
+    /// and this is the only place a frame stream is made. It is load-bearing:
+    /// inference is far slower than capture (30–60 fps in, one three-stage pass
+    /// out), and `.unbounded` would pile up every frame the consumer missed —
+    /// unbounded memory plus an overlay drifting further behind reality the
+    /// longer the app runs. One slot means a new frame replaces the pending one,
+    /// so a late consumer gets the newest. PR7's `isInferring` gate layers a
+    /// cheaper filter on top; it is not a substitute, and this policy must stay
+    /// bounded after it lands.
+    func begin() -> (stream: FrameStream, token: UInt64) {
+        let (stream, continuation) = AsyncStream.makeStream(of: VideoFrame.self,
+                                                            bufferingPolicy: .bufferingNewest(1))
+        let (previous, issued) = lock.withLock { () -> (FrameStream.Continuation?, UInt64) in
+            defer { self.continuation = continuation }
+            token &+= 1
+            return (self.continuation, token)
+        }
+        previous?.finish()
+        return (stream, issued)
+    }
+
+    /// False once a `stop()` — or a newer `start()` — has superseded this
+    /// attempt. Producers must consult it after every suspension point, before
+    /// any side effect that would leave hardware running.
+    func isCurrent(_ token: UInt64) -> Bool {
+        lock.withLock { self.token == token && continuation != nil }
+    }
+
+    /// The newest token, live or not. A teardown queued by `stop()` compares it
+    /// on arrival and stands down if a `start()` has since superseded that stop,
+    /// which is what makes the two safe to queue on unordered executors.
+    var latest: UInt64 { lock.withLock { token } }
+
+    /// Hands a frame to the live stream; a no-op once stopped, which is what
+    /// lets a producer callback still in flight finish harmlessly.
+    func yield(_ frame: VideoFrame) {
+        lock.withLock { continuation }?.yield(frame)
+    }
+
+    /// Finishes the live stream and invalidates any start attempt still in
+    /// flight. Idempotent, callable from any thread.
+    func stop() {
+        lock.withLock { () -> FrameStream.Continuation? in
+            defer { continuation = nil; token &+= 1 }
+            return continuation
+        }?.finish()
     }
 }
 
 /// Everything a frame producer can fail with. Typed on purpose: the UI has to
-/// tell "grant camera access in Settings" apart from "this build has no clip
-/// bundled", and neither case may crash.
+/// tell "grant camera access in Settings" apart from "no clip bundled", and
+/// neither case may crash.
 enum FrameSourceError: Error, Equatable, LocalizedError {
     /// No capture device — the normal state in the Simulator.
     case cameraUnavailable
-    /// The user denied (or an MDM profile restricts) camera access.
     case cameraAccessDenied
     /// `AVCaptureSession` refused the input/output wiring.
     case captureConfigurationFailed(String)
-    /// The bundled clip the Simulator path needs is not in the app bundle.
     case missingBundledVideo(resource: String, fileExtension: String)
-    /// The clip loaded but produced no decodable video frames.
     case videoDecodeUnavailable(String)
 
     var errorDescription: String? {
@@ -89,34 +134,28 @@ enum FrameSourceError: Error, Equatable, LocalizedError {
 
 /// A producer of camera-shaped frames.
 ///
-/// Lifecycle: `start()` is async and throwing because both implementations do
-/// real work that can legitimately fail (permission prompts, device lookup,
-/// bundle lookup). `stop()` is synchronous, non-throwing and idempotent so it
-/// can be called from `onDisappear` or a scene-phase change.
+/// `start()` is async and throwing because both implementations do real work
+/// that can fail (permission prompts, device lookup, bundle lookup), and it
+/// **returns the stream for that run** — see `FrameSourceLifecycle` for why a
+/// stored stream cannot survive a stop/start cycle. Consume only the stream the
+/// call handed back, and from one place only: a stream is single-consumer, so
+/// iterating it twice splits the frames rather than duplicating them.
 ///
-/// `stop()` deliberately does **not** finish the stream: it parks the producer
-/// so a later `start()` resumes into the same stream, which is what
-/// foreground/background cycling needs. The stream finishes when the source is
-/// deallocated, and consumers otherwise end their loop by cancelling their task.
-///
-/// `frames` is a single stored stream, so it is **single-consumer**: iterating
-/// it from two places splits the frames between them rather than duplicating
-/// them. PR7's view model owns the one `for await` loop and fans each frame out
-/// to the preview and to the engine.
+/// `stop()` is synchronous, non-throwing and idempotent — safe from
+/// `onDisappear` or a scene-phase change. It finishes the current stream, so the
+/// consumer's loop ends by itself, and it wins even when it lands while `start()`
+/// is suspended: that start is abandoned, and the stream it returns is finished.
 protocol FrameSource: AnyObject, Sendable {
-    var frames: FrameStream { get }
-    func start() async throws
+    func start() async throws -> FrameStream
     func stop()
 }
 
-/// The one place in the app that knows the Simulator has no camera.
-///
-/// Views must never branch on `targetEnvironment` themselves — they ask for a
-/// `FrameSource` and get whichever one this build can actually run.
+/// The one place that knows the Simulator has no capture hardware and must loop
+/// a bundled clip instead. Views never branch on `targetEnvironment` themselves
+/// — they ask for a `FrameSource` and get whichever one this build can run.
 enum FrameSourceFactory {
     static func makeDefault() -> any FrameSource {
         #if targetEnvironment(simulator)
-        // No capture hardware in the Simulator; loop the bundled clip instead.
         return VideoFileFrameSource()
         #else
         return CameraFrameSource()
