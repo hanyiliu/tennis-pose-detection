@@ -1,0 +1,498 @@
+#!/usr/bin/env python3
+"""Assert the exported Core ML packages still agree with the torch pipeline.
+
+Run it from anywhere; like ``export_coreml.py`` it locates the repo root by walking up to
+``models/pose_classification.py``. Inputs are synthesised, so no fixture files are needed,
+and several seeds run per invocation so one unlucky seed cannot define the verdict. Two
+comparison modes, reported separately -- do not quote one's numbers as the other's:
+
+``same-crop``
+    Identical 128x128 pixels into torch stage 2+3 and into ``TPDPoseNet``. Nothing but the
+    converted graphs can differ, so this carries the tight keypoint gates.
+
+``end-to-end``
+    Full frame -> ``TPDBBox`` -> ``norm_bbox_to_xyxy_pixels`` -> crop -> letterbox -> stage
+    2+3, each stack using its OWN stage-1 bbox. Stage 1's fp16 error is sub-pixel (~3e-4
+    normalized) but the bbox is *rounded to integers*, so the crop rectangle flips by a
+    pixel on a good fraction of frames and the two stacks then see different pixels. The
+    bbox and the class decision are gated; the keypoint aggregates include the
+    rounding-affected frames and are reported as information, not asserted.
+
+**Why the keypoint gate is prominence-aware.** A heatmap channel only *has* a location if
+its peak stands out. When the best value more than ``NEIGHBOR_RADIUS`` pixels away sits
+within fp16 noise of the peak, which pixel wins is decided by rounding and the argmax can
+move the full width of the map off a 1e-3 difference -- a property of the input, a joint the
+crop carries no signal for, not a conversion defect. Gating on those makes red mean nothing,
+so every channel is classified against a noise floor built from the actual fp16 ULP at its
+own peak (``numpy.spacing`` on float16): **resolvable** channels are gated, **ambiguous**
+ones never are but are always counted, because a jump in that count is itself a signal.
+
+The class gate is conditional for a mechanical reason: ``_build_pose_features`` mixes a
+visibility-weighted centre and a masked min/spread over all 18 keypoints, so ONE relocated
+channel perturbs 76 of the 130 stage-3 features. An input whose keypoints did not fully
+agree cannot grade the classifier and is excluded -- but a run where too few inputs are
+gradeable FAILS as vacuous rather than reporting a green pass.
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+import torch
+from PIL import Image, ImageDraw
+
+TOOLS_DIR = Path(__file__).resolve().parent
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
+
+# Reusing the exporter's PoseNet is deliberate: a re-implementation here could drift from
+# the graph that was actually converted, and then parity would be measured against the
+# wrong reference. Importing it also puts REPO_ROOT on sys.path.
+from export_coreml import (  # noqa: E402
+    DROPOUT, VISIBILITY_THRESHOLD, PoseNet, find_repo_root, square_size)
+
+REPO_ROOT = find_repo_root(Path(__file__).resolve())
+
+from models.bbox_detection import BBoxDetectionModel  # noqa: E402
+from models.keypoint_detection import KeypointDetectionModel  # noqa: E402
+from models.pose_classification import PoseClassificationModel  # noqa: E402
+from preprocessing.image_preprocessing import convert_image_to_tensor  # noqa: E402
+from preprocessing.pil_preprocessing import (  # noqa: E402
+    crop_pil, letterbox_resize, norm_bbox_to_xyxy_pixels)
+
+# --- gates -----------------------------------------------------------------------
+# Every constant is a measured worst case times a safety factor, and every gate prints its
+# measurement beside its limit so drift shows before it fails. Calibration sweep: 32 seeds
+# x {cpu, all} against the shipped export.
+# A peak is a location only if it beats everything outside its own 3x3 by more than fp16
+# noise; inside that 3x3 a one-pixel slide is routine even for a sharp peak. That lead must
+# clear the larger of RESOLVE_ULPS fp16 ULPs at the channel's own peak and HEATMAP_NOISE,
+# the absolute drift the converted U-Net puts on a heatmap value (the ULP term vanishes near
+# zero, where that drift is all there is). Of 13824 swept same-crop channels, 79 moved
+# further than 1px and the most prominent reached 0.12 of this floor -- an 8x margin -- with
+# 76.6% of channels still resolvable and gated.
+NEIGHBOR_RADIUS = 1
+RESOLVE_ULPS = 16.0
+HEATMAP_NOISE = 0.05
+# Resolvable channels whose peak moved further than NEIGHBOR_RADIUS. Measured 0.
+MAX_RELOCATED = 0
+# Same-pixel channels: the coordinate is idx/(size-1) in fp32 on both sides and 1 ULP near
+# 1.0 is 1.2e-7. Measured 6.0e-08.
+COORD_TOL = 1e-6
+# Raw max logit, not a probability, so it drifts further than the class probabilities do.
+# Measured 4.1e-02 same-crop.
+VIS_TOL = 1.5e-1
+# Measured 1.1e-01 over gradeable inputs -- where both stacks fed stage 3 keypoints agreeing
+# pixel for pixel, so the residue is entirely visibility drift amplified by the classifier.
+# Median 5e-13 and p99 1.3e-02: a few inputs sit on a steep part of the softmax and turn
+# 1e-02 of raw logit into 1e-01 of probability. Tightening it would only exclude those, so it
+# does double duty instead -- an input grades the classifier only when torch's OWN top-2 gap
+# exceeds it, leaving drift unable to flip a gradeable decision and any flip a real defect.
+PROB_TOL = 3e-1
+# Normalized xywh out of stage 1. Measured 3.1e-04.
+BBOX_TOL = 5e-3
+# Too few gradeable inputs means nothing was compared: fail vacuous rather than green. Worst
+# single run measured 8/12 same-crop, 4/12 end-to-end; the all-fp16 mis-export scores 0/12.
+MIN_GRADEABLE_FRACTION = 0.15
+# Cycled through in end-to-end mode; non-square and both orientations so the letterbox
+# padding is exercised on each axis.
+FRAME_SIZES = ((640, 360), (720, 1280), (512, 512), (960, 540))
+
+
+# --- synthetic inputs ------------------------------------------------------------
+def draw_figure(draw: ImageDraw.ImageDraw, rng, box) -> None:
+    """A crude articulated player inside *box* -- torso, head, two arms, two legs.
+
+    Blob fields and white noise drive the U-Net into near-flat heatmaps, i.e. exactly the
+    ambiguous channels the gate must discard. A limbed figure is what a player crop looks
+    like: over 4320 channels it resolved 91.9% vs a blob field's 90.4% at a fixed cut.
+    """
+    x0, y0, x1, y1 = box
+    width, height = x1 - x0, y1 - y0
+    skin = tuple(int(v) for v in rng.integers(150, 225, size=3))
+    shirt = tuple(int(v) for v in rng.integers(20, 235, size=3))
+    cx = x0 + width * float(rng.uniform(0.42, 0.58))
+    shoulder = y0 + height * float(rng.uniform(0.22, 0.30))
+    hip = y0 + height * float(rng.uniform(0.50, 0.58))
+    half = width * 0.18
+    thick = max(2, int(round(width * 0.09)))
+
+    def limb(sx, sy, angle, length, weight, fill):
+        ex, ey = sx + length * np.cos(angle), sy + length * np.sin(angle)
+        draw.line([(sx, sy), (ex, ey)], fill=fill, width=weight)
+        return ex, ey
+
+    draw.polygon(
+        [(cx - half, shoulder), (cx + half, shoulder),
+         (cx + half * 0.8, hip), (cx - half * 0.8, hip)], fill=shirt)
+    head = height * 0.09
+    draw.ellipse([cx - head, shoulder - 2.3 * head, cx + head, shoulder - 0.3 * head], fill=skin)
+    for side in (-1, 1):
+        flip = np.pi if side < 0 else 0.0
+        angle = float(rng.uniform(-1.0, 2.3)) + flip
+        ex, ey = limb(cx + side * half, shoulder, angle, height * 0.20, thick, shirt)
+        limb(ex, ey, angle + float(rng.uniform(-0.7, 0.7)), height * 0.18, max(2, thick - 1), skin)
+    for side in (-1, 1):
+        angle = np.pi / 2 + side * float(rng.uniform(0.05, 0.5))
+        kx, ky = limb(cx + side * half * 0.6, hip, angle, height * 0.20, thick + 1, shirt)
+        limb(kx, ky, np.pi / 2 + side * float(rng.uniform(-0.2, 0.35)), height * 0.19, thick, skin)
+
+
+def scene(rng, width: int, height: int, box) -> np.ndarray:
+    """Court-ish field -- one dominant hue, a couple of court lines, grain -- plus a figure."""
+    field = np.zeros((height, width, 3), dtype=np.int16) + rng.integers(60, 150, size=3)
+    field += np.linspace(-30, 30, height, dtype=np.int16)[:, None, None]
+    image = Image.fromarray(np.clip(field, 0, 255).astype(np.uint8), "RGB")
+    draw = ImageDraw.Draw(image)
+    for _ in range(2):
+        y = int(rng.integers(0, height))
+        draw.line([(0, y), (width, y)], fill=(235, 235, 235), width=2)
+    draw_figure(draw, rng, box)
+    grain = rng.integers(-10, 11, size=(height, width, 3))
+    return np.clip(np.asarray(image, dtype=np.int16) + grain, 0, 255).astype(np.uint8)
+
+
+def make_crops(rng, size: int, count: int, probes: bool) -> list:
+    """``count`` 128x128 player crops. With *probes*, index 0/1 are black/white instead."""
+    images = [np.zeros((size, size, 3), np.uint8),
+              np.full((size, size, 3), 255, np.uint8)] if probes else []
+    while len(images) < count:
+        images.append(scene(rng, size, size, (size * 0.12, 0.0, size * 0.88, size * 0.99)))
+    return [Image.fromarray(a) for a in images[:count]]
+
+
+def make_frames(rng, count: int) -> list:
+    """Full frames with the figure somewhere inside, so stage 1 has something to find."""
+    frames = []
+    for index in range(count):
+        width, height = FRAME_SIZES[index % len(FRAME_SIZES)]
+        left, top = width * float(rng.uniform(0.05, 0.55)), height * float(rng.uniform(0.05, 0.35))
+        span = min(width - left, height - top) * float(rng.uniform(0.5, 0.9))
+        frames.append(Image.fromarray(
+            scene(rng, width, height, (left, top, left + span * 0.55, top + span))))
+    return frames
+
+
+# --- the two stacks --------------------------------------------------------------
+class Reference:
+    """The torch side, built from the checkpoint exactly the way export_coreml.py does."""
+
+    def __init__(self, checkpoint_path: Path):
+        ckpt = torch.load(str(checkpoint_path), map_location="cpu")
+        self.bbox_size = square_size(ckpt, "bbox")
+        self.kp_size = square_size(ckpt, "keypoint")
+        pose_state = ckpt["pose_model_state"]
+        kp_state = ckpt["keypoint_model_state"]
+        self.hidden_dim = int(pose_state["fc1.weight"].shape[0])
+        self.num_classes = int(pose_state["out.weight"].shape[0])
+        self.num_keypoints = int(kp_state["extraction_conv1.weight"].shape[0])
+        self.labels = [str(n).strip().lower().replace(" ", "_") for n in ckpt["label_names"]]
+
+        self.bbox_model = BBoxDetectionModel()
+        self.bbox_model.load_state_dict(ckpt["bbox_model_state"])
+        self.bbox_model.eval()
+        keypoint_model = KeypointDetectionModel(num_keypoints=self.num_keypoints)
+        keypoint_model.load_state_dict(kp_state)
+        pose_model = PoseClassificationModel(
+            num_keypoints=self.num_keypoints, num_classes=self.num_classes,
+            hidden_dim=self.hidden_dim, dropout=DROPOUT,
+            visibility_threshold=VISIBILITY_THRESHOLD)
+        pose_model.load_state_dict(pose_state)
+        self.posenet = PoseNet(keypoint_model, pose_model).eval()
+        # A hook, not a second keypoint-model run: prominence must be measured on the exact
+        # tensor the decode saw.
+        self._heatmap = {}
+        self.posenet.kp.register_forward_hook(
+            lambda module, inputs, output: self._heatmap.__setitem__("hm", output))
+
+    @torch.no_grad()
+    def bbox(self, resized_frame: Image.Image) -> np.ndarray:
+        tensor = convert_image_to_tensor(resized_frame).unsqueeze(0)
+        return self.bbox_model(tensor).squeeze(0).numpy().astype(np.float64)
+
+    @torch.no_grad()
+    def pose(self, crop: Image.Image):
+        probs, kps = self.posenet(convert_image_to_tensor(crop).unsqueeze(0))
+        heatmap = self._heatmap["hm"].squeeze(0).numpy().astype(np.float64)
+        return (probs.squeeze(0).numpy().astype(np.float64),
+                kps.squeeze(0).numpy().astype(np.float64), heatmap)
+
+
+class CoreML:
+    """The Core ML side. Images go in as PIL: the packages declare ct.ImageType."""
+
+    def __init__(self, models_dir: Path, compute_units: str):
+        import coremltools as ct
+
+        units = ct.ComputeUnit.CPU_ONLY if compute_units == "cpu" else ct.ComputeUnit.ALL
+        self.units = units.name
+        self.bbox_model = ct.models.MLModel(str(models_dir / "TPDBBox.mlpackage"), compute_units=units)
+        self.pose_model = ct.models.MLModel(str(models_dir / "TPDPoseNet.mlpackage"), compute_units=units)
+
+    def bbox(self, resized_frame: Image.Image) -> np.ndarray:
+        out = self.bbox_model.predict({"image": resized_frame})["bbox"]
+        return np.asarray(out, dtype=np.float64).reshape(-1)
+
+    def pose(self, crop: Image.Image):
+        out = self.pose_model.predict({"image": crop})
+        probs = np.asarray(out["probs"], dtype=np.float64).reshape(-1)
+        kps = np.asarray(out["keypoints"], dtype=np.float64).reshape(-1, 3)
+        return probs, kps
+
+
+# --- prominence ------------------------------------------------------------------
+def flat_index(kps: np.ndarray, size: int) -> np.ndarray:
+    """Rebuild the flat heatmap argmax index the decode produced from its x,y output."""
+    xy = np.rint(kps[:, :2] * (size - 1)).astype(np.int64)
+    return xy[:, 1] * size + xy[:, 0]
+
+
+def peak_prominence(heatmap: np.ndarray, radius: int) -> np.ndarray:
+    """Per channel: the peak's lead over everything further than *radius* away, measured in
+    units of the noise floor that lead must clear. Above 1.0 the location is resolvable.
+    """
+    channels, height, width = heatmap.shape
+    flat = heatmap.reshape(channels, -1)
+    index = flat.argmax(axis=1)
+    peak = flat[np.arange(channels), index]
+    rows, cols = index // width, index % width
+    near_row = np.abs(np.arange(height)[None, :] - rows[:, None]) <= radius
+    near_col = np.abs(np.arange(width)[None, :] - cols[:, None]) <= radius
+    near = near_row[:, :, None] & near_col[:, None, :]
+    runner_up = np.where(near, -np.inf, heatmap).reshape(channels, -1).max(axis=1)
+    ulp = np.abs(np.spacing(peak.astype(np.float16))).astype(np.float64)
+    return (peak - runner_up) / np.maximum(RESOLVE_ULPS * ulp, HEATMAP_NOISE)
+
+
+class Stats:
+    """Running worst cases over every input in one mode."""
+
+    def __init__(self):
+        self.inputs = self.channels = self.resolvable = self.relocated = 0
+        self.worst_relocated = 0
+        self.worst_prominence = 0.0      # prominence of the most prominent relocated channel
+        self.worst_input = "-"
+        self.coord = self.vis = self.prob = self.bbox = 0.0
+        self.gradeable = self.class_agree = 0
+        self.rect_equal = self.rect_total = 0
+        self.nonfinite = []
+        self.probe = None
+
+    def note_nonfinite(self, tag: str, **arrays):
+        self.nonfinite += [f"{tag}[{n}]" for n, a in arrays.items() if not np.isfinite(a).all()]
+
+    def add_bbox(self, label: str, ref: np.ndarray, ml: np.ndarray):
+        self.note_nonfinite(f"{label} bbox", torch=ref, coreml=ml)
+        self.bbox = max(self.bbox, float(np.max(np.abs(ref - ml))))
+
+    def add_pose(self, label, ref, ml, size, verbose, same_pixels=True):
+        (ref_probs, ref_kps, heatmap), (ml_probs, ml_kps) = ref, ml
+        self.note_nonfinite(f"{label} pose", probs=ref_probs, keypoints=ref_kps)
+        self.note_nonfinite(f"{label} pose", probs=ml_probs, keypoints=ml_kps)
+
+        prominence = peak_prominence(heatmap, NEIGHBOR_RADIUS)
+        resolvable = prominence > 1.0
+        ref_index, ml_index = flat_index(ref_kps, size), flat_index(ml_kps, size)
+        moved = np.maximum(np.abs(ref_index // size - ml_index // size),
+                           np.abs(ref_index % size - ml_index % size))
+        relocated = moved > NEIGHBOR_RADIUS
+
+        self.inputs += 1
+        self.channels += prominence.size
+        self.resolvable += int(resolvable.sum())
+        gated_bad = int((resolvable & relocated).sum())
+        if gated_bad > self.worst_relocated:
+            self.worst_relocated, self.worst_input = gated_bad, label
+        self.relocated += gated_bad
+        if relocated.any():
+            self.worst_prominence = max(self.worst_prominence, float(prominence[relocated].max()))
+
+        exact = moved == 0
+        if exact.any():
+            delta = np.abs(ref_kps[:, :2] - ml_kps[:, :2])
+            self.coord = max(self.coord, float(delta[exact].max()))
+        self.vis = max(self.vis, float(np.max(np.abs(ref_kps[:, 2] - ml_kps[:, 2]))))
+
+        # Stage 3 mixes every keypoint into 76 of its 130 features, so only an input whose
+        # keypoints fully agreed can grade the classifier -- and only when torch's own
+        # decision is not itself a near tie.
+        ordered = np.sort(ref_probs)
+        gradeable = same_pixels and not relocated.any() and (ordered[-1] - ordered[-2]) > PROB_TOL
+        prob_delta = float(np.max(np.abs(ref_probs - ml_probs)))
+        ref_class, ml_class = int(np.argmax(ref_probs)), int(np.argmax(ml_probs))
+        if gradeable:
+            self.gradeable += 1
+            self.prob = max(self.prob, prob_delta)
+            self.class_agree += int(ref_class == ml_class)
+        if verbose:
+            print(f"    {label:>12}  resolvable {int(resolvable.sum()):>2}/{prominence.size}"
+                  f"  relocated {gated_bad}  |dprob| {prob_delta:.2e}"
+                  f"  class {ref_class}/{ml_class}  {'gradeable' if gradeable else 'ungraded'}")
+        return ref_class, ml_class
+
+
+class Row:
+    def __init__(self, name, measured, limit, ok=None):
+        self.name, self.measured, self.limit, self.ok = name, measured, limit, ok
+
+
+def pose_rows(stats: Stats, keypoints_gated: bool) -> list:
+    """Rows shared by both modes. The class rows assert in both -- a gradeable input fed
+    stage 3 the same keypoints on both sides, which end-to-end also demands the same crop
+    rect. Only the keypoint aggregates are same-crop-only, where the rounding cannot be it.
+    """
+    def gate(value):
+        return value if keypoints_gated else None
+
+    resolvable_pct = 100.0 * stats.resolvable / max(stats.channels, 1)
+    floor = int(np.ceil(MIN_GRADEABLE_FRACTION * stats.inputs))
+    return [
+        Row("resolvable peaks relocated > 1px",
+            f"{stats.relocated}/{stats.resolvable} (worst {stats.worst_input})",
+            f"<= {MAX_RELOCATED}", gate(stats.relocated <= MAX_RELOCATED)),
+        Row("closest call: prominence of a moved peak",
+            f"{stats.worst_prominence:.2f}x noise floor", "resolvable > 1.00"),
+        Row("resolvable channels (input quality)",
+            f"{stats.resolvable}/{stats.channels} ({resolvable_pct:.1f}%)", "-"),
+        Row("ambiguous channels (ungated, watch it)",
+            f"{stats.channels - stats.resolvable}/{stats.channels}", "-"),
+        Row("keypoint coord max|d|, same-pixel channels", f"{stats.coord:.3e}",
+            f"< {COORD_TOL:g}", gate(stats.coord < COORD_TOL)),
+        Row("visibility max|d| (raw logit)", f"{stats.vis:.3e}",
+            f"< {VIS_TOL:g}", gate(stats.vis < VIS_TOL)),
+        Row("gradeable inputs (keypoints agreed)",
+            f"{stats.gradeable}/{stats.inputs}", f">= {floor}",
+            stats.gradeable >= max(floor, 1)),
+        # Both would read a vacuous PASS on zero gradeable inputs, so they carry the same
+        # >0 requirement the gradeable row does rather than pass on no evidence.
+        Row("class probability max|d|, gradeable", f"{stats.prob:.3e}",
+            f"< {PROB_TOL:g}", stats.gradeable > 0 and stats.prob < PROB_TOL),
+        Row("class argmax, gradeable inputs", f"{stats.class_agree}/{stats.gradeable}",
+            f"{stats.gradeable}/{stats.gradeable}",
+            stats.gradeable > 0 and stats.class_agree == stats.gradeable),
+        Row("finite outputs (no NaN/Inf)", ", ".join(stats.nonfinite[:3]) or "clean",
+            "clean", not stats.nonfinite),
+    ]
+
+
+def run_same_crop(reference: Reference, coreml: CoreML, crops, label: str, stats, verbose):
+    for index, crop in enumerate(crops):
+        ref, ml = reference.pose(crop), coreml.pose(crop)
+        classes = stats.add_pose(f"{label}:{index}", ref, ml, reference.kp_size, verbose)
+        if stats.probe is None:  # the black crop: stage-3 fp16 overflow probe
+            stats.probe = (float(ref[1][:, 2].sum()), float(ml[1][:, 2].sum()), classes)
+
+
+def run_end_to_end(reference: Reference, coreml: CoreML, frames, label: str, stats, verbose):
+    size = reference.kp_size
+    for index, frame in enumerate(frames):
+        width, height = frame.size
+        resized = frame.resize((reference.bbox_size, reference.bbox_size), Image.Resampling.BILINEAR)
+        ref_bbox, ml_bbox = reference.bbox(resized), coreml.bbox(resized)
+        stats.add_bbox(f"{label}:{index}", ref_bbox, ml_bbox)
+
+        rects = [norm_bbox_to_xyxy_pixels(torch.from_numpy(b), width, height)
+                 for b in (ref_bbox, ml_bbox)]
+        crops = [letterbox_resize(crop_pil(frame, r), size=(size, size)) for r in rects]
+        same_rect = rects[0] == rects[1]
+        stats.rect_total += 1
+        stats.rect_equal += int(same_rect)
+        stats.add_pose(f"{label}:{index}", reference.pose(crops[0]), coreml.pose(crops[1]),
+                       size, verbose, same_rect)
+
+
+def print_table(title: str, note: str, rows) -> bool:
+    print(f"\n{title}")
+    print(f"  {note}")
+    print(f"  {'check':<42}{'measured':>26}{'limit':>18}  status")
+    print(f"  {'-' * 92}")
+    for row in rows:
+        status = "info" if row.ok is None else ("PASS" if row.ok else "FAIL")
+        print(f"  {row.name:<42}{row.measured:>26}{row.limit:>18}  {status}")
+    return all(row.ok is not False for row in rows)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--checkpoint", type=Path, default=REPO_ROOT / "exports" / "colab_e2e_best_2.pt",
+        help="checkpoint the packages were exported from (default: exports/colab_e2e_best_2.pt)")
+    parser.add_argument(
+        "--models-dir", "--models",  # --models is the spelling `make parity` passes
+        dest="models_dir", type=Path,
+        default=REPO_ROOT / "frontend" / "ios" / "TPD" / "Models",
+        help="directory holding TPDBBox.mlpackage and TPDPoseNet.mlpackage")
+    parser.add_argument("--num-inputs", type=int, default=8, help="inputs per seed per mode")
+    parser.add_argument("--seed", type=int, default=0, help="first input generator seed")
+    parser.add_argument(
+        "--num-seeds", type=int, default=4,
+        help="consecutive seeds from --seed, so one unlucky seed cannot decide the verdict")
+    parser.add_argument(
+        "--compute-units", choices=("cpu", "all"), default="cpu",
+        help="Core ML compute units: cpu is reproducible, all lets the ANE/GPU in (default: cpu)")
+    parser.add_argument("--verbose", action="store_true", help="print per-input deltas")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    if args.num_inputs < 2 or args.num_seeds < 1:
+        raise SystemExit("--num-inputs must be >= 2 (0/1 are the black/white probes), "
+                         "--num-seeds >= 1")
+
+    checkpoint = args.checkpoint.expanduser().resolve()
+    models_dir = args.models_dir.expanduser().resolve()
+    if not checkpoint.is_file():
+        raise SystemExit(f"checkpoint not found: {checkpoint}")
+    for name in ("TPDBBox.mlpackage", "TPDPoseNet.mlpackage"):
+        if not (models_dir / name).exists():
+            raise SystemExit(f"missing {models_dir / name} -- run `make export` from frontend/ios")
+
+    print(f"repo root   {REPO_ROOT}\ncheckpoint  {checkpoint}\nmodels dir  {models_dir}")
+    reference = Reference(checkpoint)
+    coreml = CoreML(models_dir, args.compute_units)
+    seeds = list(range(args.seed, args.seed + args.num_seeds))
+    print(f"models      {reference.bbox_size}px bbox, {reference.kp_size}px keypoint, "
+          f"{reference.num_keypoints} keypoints, {reference.num_classes} classes "
+          f"{reference.labels}")
+    print(f"inputs      {args.num_inputs} per seed per mode, seeds {seeds}, "
+          f"compute units {coreml.units}")
+
+    same, e2e = Stats(), Stats()
+    for position, seed in enumerate(seeds):
+        rng = np.random.default_rng(seed)
+        crops = make_crops(rng, reference.kp_size, args.num_inputs, probes=position == 0)
+        frames = make_frames(rng, args.num_inputs)
+        run_same_crop(reference, coreml, crops, f"same s{seed}", same, args.verbose)
+        run_end_to_end(reference, coreml, frames, f"e2e  s{seed}", e2e, args.verbose)
+
+    torch_sum, coreml_sum, (ref_class, ml_class) = same.probe
+    rows = pose_rows(same, keypoints_gated=True)
+    rows.append(
+        Row("black-crop stage-3 overflow probe",
+            f"sum(vis) {torch_sum:+.1f}/{coreml_sum:+.1f} class {ref_class}/{ml_class}",
+            "same class", ref_class == ml_class))
+    ok = print_table(
+        f"SAME-CROP  stages 2+3, identical pixels into both stacks  ({same.inputs} inputs)",
+        "the real model comparison: only the converted graphs can differ here",
+        rows,
+    )
+
+    e2e_rows = [
+        Row("stage-1 bbox max|d| (normalized)", f"{e2e.bbox:.3e}",
+            f"< {BBOX_TOL:g}", e2e.bbox < BBOX_TOL),
+        Row("identical integer crop rects", f"{e2e.rect_equal}/{e2e.rect_total}", "-"),
+    ] + pose_rows(e2e, keypoints_gated=False)
+    ok = print_table(
+        f"END-TO-END  frame -> bbox -> crop -> stages 2+3  ({e2e.inputs} inputs)",
+        "each stack rounds its own crop rect, so the ungated rows measure that rounding",
+        e2e_rows,
+    ) and ok
+
+    print("\nPARITY OK" if ok else "\nPARITY FAILED")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
