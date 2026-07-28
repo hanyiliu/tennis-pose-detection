@@ -27,11 +27,15 @@ all: generate lint
 # This Mac is x86_64. PyTorch publishes no macOS x86_64 wheels above 2.2.x, so
 # the only stack that resolves is python3.9 + torch 2.2.2 + numpy<2 +
 # coremltools 8.x. Do not "upgrade" these pins on an Intel host.
+# Pins live in tools/requirements.txt and nowhere else — duplicating them here
+# would let the two drift apart silently.
 $(PY):
+	@test -f $(TOOLS)/requirements.txt || { \
+		echo "$(TOOLS)/requirements.txt not found (it lands with the export tooling)" >&2; \
+		exit 1; }
 	$(PYTHON39) -m venv $(VENV)
 	$(VENV)/bin/python -m pip install --upgrade pip
-	$(VENV)/bin/python -m pip install \
-		"torch==2.2.2" "torchvision==0.17.2" "numpy<2" "coremltools>=8,<9"
+	$(VENV)/bin/python -m pip install -r $(TOOLS)/requirements.txt
 
 venv: $(PY)
 	@$(PY) -c "import sys, torch, coremltools; \
@@ -74,9 +78,14 @@ lint:
 	for d in $(SRC_DIRS); do \
 		[ -d "$$d" ] || { echo "lint: source directory '$$d' not found (run from frontend/ios)" >&2; exit 1; }; \
 	done; \
+	tmp=$$(mktemp); \
+	find $(SRC_DIRS) -type f -name '*.swift' -print0 | sort -z > "$$tmp"; \
+	st=$${PIPESTATUS[0]}; \
+	[ "$$st" -eq 0 ] || { rm -f "$$tmp"; \
+		echo "lint: find exited $$st — part of the source tree is unreadable" >&2; exit 1; }; \
 	sources=(); \
-	while IFS= read -r -d '' f; do sources+=("$$f"); done \
-		< <(find $(SRC_DIRS) -type f -name '*.swift' -print0 | sort -z); \
+	while IFS= read -r -d '' f; do sources+=("$$f"); done < "$$tmp"; \
+	rm -f "$$tmp"; \
 	if [ "$${#sources[@]}" -eq 0 ]; then \
 		echo "lint: no Swift sources found under $(SRC_DIRS)" >&2; exit 1; \
 	fi; \
