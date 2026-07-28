@@ -59,7 +59,7 @@ class PoseNet(nn.Module):
     """Fused stage 2 + stage 3: cropped player image in, class probabilities out.
 
     The decode between the two stages is the parity contract with
-    ``preprocessing/tensor_preprocessing.py::extract_keypoints_from_heatmaps``.
+    ``preprocessing/tensor_preprocessing.py::heatmaps_to_keypoints``.
     """
 
     def __init__(self, keypoint_model: nn.Module, pose_model: nn.Module):
@@ -144,7 +144,7 @@ def fp16_except_decode_and_stage3(ct):
 
     Stage 3 divides by ``vis.sum().clamp_min(1e-6)``, and visibility is the raw max logit,
     routinely negative (measured -40.6 on a black crop). The clamp then fires and ``center``
-    reaches ~1e6 -- past the fp16 max of 65504, so ``centered_xy`` goes inf/nan into the
+    reaches 3.5e7 -- past the fp16 max of 65504, so ``centered_xy`` corrupts the
     classifier. The U-Net convolutions upstream carry every megabyte and stay fp16.
     """
     memo = {}

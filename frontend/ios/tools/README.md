@@ -44,7 +44,7 @@ reads plain `Float32` `MLMultiArray`s whatever the internal precision is.
 ### The fused decode
 
 `PoseNet.forward` bakes the heatmap decode from
-`preprocessing/tensor_preprocessing.py::extract_keypoints_from_heatmaps` into the graph:
+`preprocessing/tensor_preprocessing.py::heatmaps_to_keypoints` into the graph:
 per-channel flat argmax, `y = idx // W`, `x = idx % W`, `x/(W-1)`, `y/(H-1)`, and the **raw max
 logit** as visibility (never sigmoided). Stage 3's `forward()` already softmaxes, so the exported
 `probs` are probabilities — iOS must not softmax again.
@@ -77,16 +77,17 @@ Plain fp16 broke the fused graph in two ways. Both were reproduced at the MIL le
 2. **fp16 overflowed in the stage-3 body center.** Visibility here is the raw max logit, so
    `vis.sum()` is often negative (measured −40.6 on a black crop, −4.4 on mid-gray).
    `clamp_min(1e-6)` then makes the divisor 1e-6 and `center = (xy*vis).sum() / vis_sum` reaches
-   3.5e7, past the fp16 ceiling of 65504 — `centered_xy` went inf/nan into the classifier. Fixed by
-   running everything downstream of the argmax in fp32 via `FP16ComputePrecision(op_selector=…)`.
+   3.5e7, past the fp16 ceiling of 65504. No inf/nan surfaces — the classifier collapses to one
+   constant vector, predicting `serve` where torch says `forehand`. Fixed: fp32 downstream of argmax.
 
-The earlier note in this file blamed "near-flat heatmap peaks" with a median top-1/top-2 logit gap
-of 0.10. That diagnosis was wrong: the peaks are fine, the index cast and the overflow were not.
-The fp32 head costs 0.5 MB against the old all-fp16 build (TPDPoseNet 29.8 → 30.3 MB, 34.0 → 34.5
-MB total) rather than the 68 MB an all-fp32 export needs. Measured here on CPU compute units over
-20 deterministic inputs (black / white / two flat grays / 10 random 128×128 crops / 6 random full
-frames), with the same pixels entering both stacks, exported keypoints are **bit-identical** to the
-torch pipeline on all 360 channels, `max|Δprob| = 6.3e-3`, and the predicted class agrees 20/20.
+An earlier note here blamed "near-flat heatmap peaks" (median top-1/top-2 gap 0.10). That diagnosis
+was wrong: the peaks are fine, the index cast and the overflow were not. The fp32 head costs 0.5 MB
+over all-fp16 (TPDPoseNet 29.8 → 30.3 MB), not the 68 MB all-fp32 needs. Re-measured independently
+on a second 20-input set, same pixels into both stacks: flat-argmax **index equality 359/360**
+(360/360 on CPU+GPU), `max|Δprob| = 6.3e-3`, class 20/20. **Gate on index equality, not
+bit-exactness** — 34 channels differ by ≤1 fp32 ULP and one lands 2 px out where two pixels 4.0e-4
+apart in fp32 collapse to one fp16 value, a tie inherent to the fp16 U-Net. Visibility needs its own
+tolerance: it is the raw logit, `max|Δvis| = 1.0e-2`, ~3× the probability delta.
 
 Stage 1 stays plain fp16. Its bbox differs from torch by at most `3.3e-4` normalized (≈0.2 px at
 640 px wide), which is sub-pixel, but `norm_bbox_to_xyxy_pixels` rounds to integers and that
