@@ -24,6 +24,7 @@ import shutil
 import sys
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -71,10 +72,14 @@ class PoseNet(nn.Module):
         b, k, h, w = hm.shape
         flat = hm.reshape(b, k, h * w)
         vis, idx = flat.max(dim=-1)  # visibility is the RAW max logit, never sigmoided
-        idxf = idx.float()
-        y = torch.floor(idxf / w)
-        x = idxf - y * w
-        kps = torch.stack([x / (w - 1), y / (h - 1), vis], dim=-1)  # (B, K, 3)
+        # Split the flat index with INTEGER ops. Never convert idx itself: it reaches
+        # h*w-1 = 16383 and fp16 is only exact on integers up to 2048, so a float divide
+        # decodes most channels to the wrong pixel. Row/column are 0..127, exact in fp16.
+        y_i = torch.div(idx, w, rounding_mode="floor")
+        x_i = idx - y_i * w
+        x = x_i.float() / (w - 1)
+        y = y_i.float() / (h - 1)
+        kps = torch.stack([x, y, vis], dim=-1)  # (B, K, 3)
         probs = self.pose(kps)  # forward() already applies softmax
         return probs, kps
 
@@ -103,19 +108,56 @@ def square_size(checkpoint: dict, prefix: str) -> int:
     return height
 
 
-def pick_deployment_target(ct):
-    """Highest iOS target the installed coremltools actually knows about."""
-    for name in ("iOS18", "iOS17", "iOS16", "iOS15"):
-        target = getattr(ct.target, name, None)
-        if target is not None:
-            return name, target
-    return None, None
+def deployment_target(ct):
+    """Pinned to the app's IPHONEOS_DEPLOYMENT_TARGET; never auto-selected."""
+    target = getattr(ct.target, "iOS17", None)
+    if target is None:
+        raise SystemExit(
+            f"coremltools {ct.__version__} does not expose ct.target.iOS17, which the "
+            "iOS app's deployment target requires. Install a coremltools that does; do "
+            "not substitute another target."
+        )
+    return target
+
+
+def _input_vars(op):
+    for value in op.inputs.values():
+        for var in (value if isinstance(value, (list, tuple)) else [value]):
+            yield var
+
+
+def downstream_of_argmax(op, memo):
+    """True if *op* transitively consumes the heatmap argmax, i.e. is decode or stage 3."""
+    cached = memo.get(op.name)
+    if cached is not None:
+        return cached
+    memo[op.name] = False  # cycle guard
+    result = op.op_type == "reduce_argmax" or any(
+        var.op is not None and downstream_of_argmax(var.op, memo) for var in _input_vars(op)
+    )
+    memo[op.name] = result
+    return result
+
+
+def fp16_except_decode_and_stage3(ct):
+    """fp16 everywhere upstream of the argmax; fp32 from the argmax onwards.
+
+    Stage 3 divides by ``vis.sum().clamp_min(1e-6)``, and visibility is the raw max logit,
+    routinely negative (measured -40.6 on a black crop). The clamp then fires and ``center``
+    reaches ~1e6 -- past the fp16 max of 65504, so ``centered_xy`` goes inf/nan into the
+    classifier. The U-Net convolutions upstream carry every megabyte and stay fp16.
+    """
+    memo = {}
+    return ct.transform.FP16ComputePrecision(
+        op_selector=lambda op: not downstream_of_argmax(op, memo)
+    )
 
 
 def convert(ct, module: nn.Module, example: torch.Tensor, output_names, precision, target):
     traced = torch.jit.trace(module, example, strict=False)
     traced.eval()
-    kwargs = dict(
+    return ct.convert(
+        traced,
         inputs=[
             ct.ImageType(
                 name="image",
@@ -124,13 +166,13 @@ def convert(ct, module: nn.Module, example: torch.Tensor, output_names, precisio
                 color_layout=ct.colorlayout.RGB,
             )
         ],
-        outputs=[ct.TensorType(name=name) for name in output_names],
+        # fp32 outputs regardless of internal precision: the client reads plain Float32
+        # MLMultiArrays, and keypoints/probs are too small to care about the byte count.
+        outputs=[ct.TensorType(name=name, dtype=np.float32) for name in output_names],
         convert_to="mlprogram",
         compute_precision=precision,
+        minimum_deployment_target=target,
     )
-    if target is not None:
-        kwargs["minimum_deployment_target"] = target
-    return ct.convert(traced, **kwargs)
 
 
 def save(model, path: Path) -> float:
@@ -159,7 +201,8 @@ def parse_args() -> argparse.Namespace:
         "--precision",
         choices=("fp16", "fp32"),
         default="fp16",
-        help="Core ML weight/activation precision (default: fp16)",
+        help="fp16 keeps the convolutions in fp16 and the decode plus stage 3 in fp32; "
+             "fp32 forces the whole graph to fp32 (default: fp16)",
     )
     return parser.parse_args()
 
@@ -243,27 +286,28 @@ def main() -> int:
     print(f"  posenet   {tuple(pose_example.shape)} -> probs {tuple(probs.shape)}, "
           f"keypoints {tuple(kps.shape)}\n")
 
-    precision = ct.precision.FLOAT32 if args.precision == "fp32" else ct.precision.FLOAT16
-    target_name, target = pick_deployment_target(ct)
-    print(f"precision {args.precision}, minimum_deployment_target "
-          f"{target_name or 'unset (coremltools default)'}\n")
+    fp32 = args.precision == "fp32"
+    bbox_precision = ct.precision.FLOAT32 if fp32 else ct.precision.FLOAT16
+    # Stage 1 is pure convolution, so plain fp16 is safe there; the fused graph needs
+    # the decode and stage 3 kept in fp32.
+    posenet_precision = bbox_precision if fp32 else fp16_except_decode_and_stage3(ct)
+    precision_label = "fp32" if fp32 else "fp16-unet-fp32-decode-and-stage3"
+    target = deployment_target(ct)
+    print(f"precision {precision_label}, minimum_deployment_target iOS17\n")
 
-    bbox_path = out_dir / "TPDBBox.mlpackage"
-    posenet_path = out_dir / "TPDPoseNet.mlpackage"
-
+    # Both conversions run to completion before anything touches out_dir: a half-written
+    # directory would pair a fresh stage 1 with a stale stage 2+3.
     print("converting TPDBBox ...")
-    bbox_ml = convert(ct, bbox_model, bbox_example, ["bbox"], precision, target)
-    bbox_mb = save(bbox_ml, bbox_path)
+    bbox_ml = convert(ct, bbox_model, bbox_example, ["bbox"], bbox_precision, target)
 
     print("converting TPDPoseNet (stages 2+3 fused) ...")
     try:
         posenet_ml = convert(
-            ct, posenet, pose_example, ["probs", "keypoints"], precision, target
+            ct, posenet, pose_example, ["probs", "keypoints"], posenet_precision, target
         )
     except Exception as exc:  # noqa: BLE001 - the fallback decision needs every failure
         print("\n" + "!" * 78, file=sys.stderr)
-        print("FUSED STAGE 2+3 CONVERSION FAILED -- no TPDPoseNet.mlpackage was written.",
-              file=sys.stderr)
+        print("FUSED STAGE 2+3 CONVERSION FAILED -- out dir left untouched.", file=sys.stderr)
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
         print(
             "\nThe heatmap argmax decode could not be lowered into a Core ML program.\n"
@@ -274,6 +318,10 @@ def main() -> int:
         )
         print("!" * 78, file=sys.stderr)
         return 1
+
+    bbox_path = out_dir / "TPDBBox.mlpackage"
+    posenet_path = out_dir / "TPDPoseNet.mlpackage"
+    bbox_mb = save(bbox_ml, bbox_path)
     posenet_mb = save(posenet_ml, posenet_path)
 
     labels_path = out_dir / "TPDLabels.json"
@@ -287,7 +335,8 @@ def main() -> int:
         "numClasses": num_classes,
         "bboxModel": bbox_path.name,
         "poseModel": posenet_path.name,
-        "precision": args.precision,
+        "precision": precision_label,
+        "minimumDeploymentTarget": "iOS17",
         "sourceCheckpoint": checkpoint_path.name,
         "sourceCheckpointSha256": sha256_of(checkpoint_path),
     }

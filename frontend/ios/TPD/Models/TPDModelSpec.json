@@ -6,7 +6,8 @@
   "numClasses": 4,
   "bboxModel": "TPDBBox.mlpackage",
   "poseModel": "TPDPoseNet.mlpackage",
-  "precision": "fp16",
+  "precision": "fp16-unet-fp32-decode-and-stage3",
+  "minimumDeploymentTarget": "iOS17",
   "sourceCheckpoint": "colab_e2e_best_2.pt",
   "sourceCheckpointSha256": "9b3ea8955e0bb2d0c9365f34bf80aac377a86c3393f83a29664c535e4990ef12"
 }
