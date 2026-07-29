@@ -3,6 +3,7 @@
 
 import CoreGraphics
 import CoreImage
+import Foundation
 import Observation
 import SwiftUI
 
@@ -23,17 +24,38 @@ struct RenderedFrame: @unchecked Sendable {
 /// call — so actor isolation, one instance, serialized calls, is exactly the
 /// contract it asks for, and is what makes this legal under Swift 6.
 actor InferenceWorker {
-    private let engine: TPDInferenceEngine
+    /// Built by `load()`, **never** by `init` — which is the whole reason this
+    /// is a `var?`. An actor's `init` body runs synchronously in the *caller's*
+    /// isolation domain; it does not hop to the actor. So `TPDInferenceEngine()`
+    /// inside one performs both `MLModel(contentsOf:)` loads on whatever thread
+    /// said `InferenceWorker()` — main — and froze the UI for 1.5s at launch.
+    /// Do not "simplify" this back to `let engine` plus a throwing `init`.
+    private var engine: TPDInferenceEngine?
     /// Display rasterization only. Pointedly *not* the engine's context, whose
     /// colour management is switched off for numeric parity with the Python
     /// pipeline — those settings are for matching floats, not for looking right.
     private let display = CIContext()
 
-    init() throws { engine = try TPDInferenceEngine() }
+    /// Loads both Core ML models, off the main actor. Idempotent, so a caller
+    /// re-entering the loop after a failure retries the load rather than
+    /// assuming it already happened.
+    func load() throws {
+        guard engine == nil else { return }
+        engine = try TPDInferenceEngine()
+        // Cheap standing proof: if the load ever migrates back into `init` this
+        // prints YES, which is otherwise visible only in a profile.
+        #if DEBUG
+        NSLog("TPD model load ran on the main thread: %@", Thread.isMainThread ? "YES" : "NO")
+        #endif
+    }
 
     /// One frame, start to finish. Returns `nil` only if the display raster fails,
     /// which is a dropped frame rather than an error worth surfacing.
     func process(_ frame: VideoFrame) throws -> RenderedFrame? {
+        // Cheap after the first call, and it keeps the engine's existence an
+        // invariant of this method rather than of the caller's call order.
+        try load()
+        guard let engine else { return nil }
         let image = CIImage(cvPixelBuffer: frame.pixelBuffer)
         let result = try engine.predict(frame: image)
         guard let raster = display.createCGImage(image, from: image.extent) else { return nil }
@@ -53,9 +75,22 @@ final class LiveViewModel {
 
     private(set) var frame: RenderedFrame?
     private(set) var failure: Failure?
+    /// **The recovery token.** `run()` returns for good on a failed start and
+    /// cannot restart itself, so the view drives `.task(id:)` off this and
+    /// bumping it is what re-enters the loop. Without it the camera-denied
+    /// state's "enable it in Settings" is advice the app cannot honour: coming
+    /// back from Settings finds the loop already gone.
+    private(set) var attempt = 0
     var overlay = OverlayOptions()
 
+    /// Held rather than made per run, so a retry re-uses models already loaded
+    /// and only re-attempts the load if it was the thing that failed.
+    private let worker = InferenceWorker()
     private let source: any FrameSource
+    /// Which `run()` owns `source`. `.task(id:)` starts the replacement without
+    /// awaiting the cancelled run's teardown, so a stale `defer` could otherwise
+    /// call `stop()` *after* the new run's `start()` and silently kill it.
+    private var generation = 0
     /// **The drop gate.** Capture runs at 30–60 fps and one three-stage pass does
     /// not. While this is true every arriving frame is discarded unread, so the
     /// engine always works on the newest frame rather than an ageing queue. The
@@ -70,10 +105,13 @@ final class LiveViewModel {
     /// Runs until the enclosing `.task` is cancelled, which ends the stream and
     /// therefore this loop. Never throws: every failure becomes a visible state.
     func run() async {
-        defer { source.stop() }
-        let worker: InferenceWorker
+        generation += 1
+        let mine = generation
+        defer { if generation == mine { source.stop() } }
         do {
-            worker = try InferenceWorker()
+            // `await`, not a constructor: this suspends main while the models
+            // load on the worker's executor. See `InferenceWorker.load()`.
+            try await worker.load()
         } catch {
             failure = Self.failure(for: error)
             return
@@ -91,7 +129,7 @@ final class LiveViewModel {
             isInferring = true
             // Inherits this actor, so it resumes on main to publish — but the
             // await below hops to `worker`, and that is where inference runs.
-            Task { [weak self] in
+            Task { [weak self, worker] in
                 do {
                     let rendered = try await worker.process(video)
                     self?.finish(rendered, nil)
@@ -100,6 +138,14 @@ final class LiveViewModel {
                 }
             }
         }
+    }
+
+    /// Re-enters the loop. Clearing `failure` first is deliberate: it swaps the
+    /// dead-end message for the neutral "starting" state, so a retry that fails
+    /// again is visibly a second attempt rather than a button that did nothing.
+    func retry() {
+        failure = nil
+        attempt += 1
     }
 
     private func finish(_ rendered: RenderedFrame?, _ error: Error?) {

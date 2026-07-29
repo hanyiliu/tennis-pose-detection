@@ -4,6 +4,7 @@
 import SwiftUI
 
 struct LiveCameraView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @State private var model = LiveViewModel()
 
     var body: some View {
@@ -19,7 +20,15 @@ struct LiveCameraView: View {
         }
         .preferredColorScheme(.dark)
         // Cancelled on disappear; the loop's `defer` stops the source with it.
-        .task { await model.run() }
+        // Keyed on `attempt`: `run()` returns for good when the start fails, so
+        // re-entering the loop means starting a *new* task, not resuming one.
+        .task(id: model.attempt) { await model.run() }
+        // The other half of the same promise. The camera-denied state sends the
+        // user to Settings; granting access there has to be enough on its own,
+        // without them noticing a button back here.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active, model.failure != nil { model.retry() }
+        }
     }
 
     private var controls: some View {
@@ -71,6 +80,14 @@ struct LiveCameraView: View {
                     .font(.footnote)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.white.opacity(0.65))
+                // Only once something has actually failed: while the first
+                // attempt is still starting there is nothing to retry.
+                Button("Try again") { model.retry() }
+                    .font(.system(size: 15, weight: .semibold))
+                    .buttonStyle(.borderedProminent)
+                    .tint(.yellow)
+                    .foregroundStyle(.black)
+                    .accessibilityHint("Starts the live feed again")
             }
         }
         .padding(28)
