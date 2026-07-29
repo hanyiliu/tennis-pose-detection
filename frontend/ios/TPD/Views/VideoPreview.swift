@@ -46,15 +46,14 @@ final class VideoPreviewModel: NSObject {
     @ObservationIgnored private var shownSince: CFTimeInterval = 0
     @ObservationIgnored private var analysis: Task<Void, Never>?
     @ObservationIgnored private var source: URL?
-    /// `resuming` is a restart waiting for its rewind; `stopped` keeps a cancelled
-    /// pass, or a load parked on an await, from re-arming anything after teardown.
+    /// `resuming` awaits its rewind; `stopped` blocks re-arming after teardown.
     @ObservationIgnored private var scrubbing = false
     @ObservationIgnored private var resuming = false
     @ObservationIgnored private var stopped = false
     @ObservationIgnored private var rastering = false
-    /// Idempotent — the view's `.task` may re-run without the screen going away.
-    /// All four awaits can be dismissed across, and a player and display link
-    /// installed after that `stop()` leak: the run loop retains the link.
+    /// Idempotent — the view's `.task` may re-run without the screen going away. All
+    /// four awaits can be dismissed across; anything installed after `stop()` leaks,
+    /// because the run loop retains the display link.
     func start(url: URL) async {
         guard player == nil, !stopped else { return }
         source = url
@@ -96,14 +95,16 @@ final class VideoPreviewModel: NSObject {
         if let source { try? FileManager.default.removeItem(at: source) }
     }
 
-    /// Playback is an *intent*: at the very end `play()` does nothing, so a restart
-    /// rewinds and `tick` starts it once the playhead moves — a `play()` beside the
-    /// rewind, or from its completion, races it and can be lost.
+    /// Playback is an *intent*: at the end `play()` is a no-op, so a restart rewinds
+    /// and `tick` starts it once the playhead moves — a `play()` beside the rewind races it.
     func togglePlay() {
         guard let player, !stopped else { return }
         if player.rate > 0 || resuming {
             resuming = false; player.pause()
-        } else if duration > 0, time >= duration - 0.05 {
+        } else if duration > 0, player.currentTime().seconds >= duration - 0.05 {
+            // Ask the PLAYER, not the published `time`: that is the last *rasterized*
+            // frame's stamp and trails by seconds once the clip stops, so a tap in that
+            // window read as "not at the end" and fell to a no-op `play()`.
             // `pause()` is not redundant at rate 0: it clears the played-to-end
             // disposition, without which the rewind is sometimes dropped.
             resuming = true; player.pause(); seek(to: 0)
@@ -132,9 +133,8 @@ final class VideoPreviewModel: NSObject {
         // Paused, "the time this vsync shows" lags a seek; `currentTime()` does not.
         var itemTime = output.itemTime(forHostTime: CACurrentMediaTime())
         if player.rate == 0 { itemTime = player.currentTime() }
-        // The restart's second half: the rewind has landed once the playhead is
-        // off the end, and only then can `play()` take. Re-asserted until the
-        // player's rate agrees, so no dropped resume strands the button.
+        // The restart's second half: the rewind has landed once the playhead is off
+        // the end; re-asserted until the rate agrees so no dropped resume strands it.
         if resuming, player.currentTime().seconds < duration - 0.05 {
             player.play()
             resuming = player.rate == 0
