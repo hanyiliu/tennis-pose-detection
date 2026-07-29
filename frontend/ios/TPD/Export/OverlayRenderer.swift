@@ -1,8 +1,9 @@
 //  OverlayRenderer.swift
 //  The overlay's GEOMETRY, and the CoreGraphics rasterizer the exporter draws with.
-//  `OverlayGeometry` is meant to be the one place box/dot/pill placement is computed: two drawing
-//  paths drift, and the drift stays invisible until someone diffs a screenshot against an exported
-//  frame. `OverlayCanvas` still keeps its own copy — migrating it is the next PR's job.
+//  `OverlayGeometry` is the one place box/dot/pill placement is computed: two drawing paths drift,
+//  and the drift stays invisible until someone diffs a screenshot against an exported frame. Both
+//  rasterizers — this one and `OverlayCanvas` — now consume the same value, and
+//  `OverlayParityTests` renders a result through both and compares where the pixels landed.
 
 import CoreGraphics
 import CoreText
@@ -33,10 +34,12 @@ struct OverlayGeometry: Equatable {
     var box: CGRect?
     var dots: [Dot] = []
     var pill: Pill?
-    /// `measure` is the one thing the rasterizers cannot share — SwiftUI resolves a `Text`,
-    /// CoreGraphics a `CTLine` — so it is injected and everything downstream decided once, here.
+    /// `measure` defaults to CoreText for **both** rasterizers, so the pill is sized once: SwiftUI
+    /// resolves its own `Text` to draw the caption, never to place it. It stays injectable only so
+    /// tests can assert placement against arithmetic instead of against a font's metrics.
     init(result: TPDResult, options: OverlayOptions, size: CGSize,
-         style: OverlayStyle = OverlayStyle(), measure: (String, CGFloat) -> CGSize) {
+         style: OverlayStyle = OverlayStyle(),
+         measure: (String, CGFloat) -> CGSize = OverlayRenderer.measure) {
         guard result.frameSize.width > 0, result.frameSize.height > 0 else { return }
         let fit = FrameFit(frame: result.frameSize, view: size)
         let bounds = fit.map(result.bbox)
@@ -81,14 +84,18 @@ enum OverlayRenderer {
     static let dotOutlineColor = CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.6)
     static let captionColor = CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 1)
 
-    /// Measures with CoreText; the SwiftUI side passes its own `measure` to the same init.
+    /// The caption's size in the destination's own units — `OverlayGeometry`'s default measure,
+    /// and therefore the metric the live canvas sizes its pill with too.
+    static func measure(_ caption: String, _ points: CGFloat) -> CGSize {
+        let text = typeset(caption, points)
+        return CGSize(width: text.width, height: text.ascent + text.descent)
+    }
+
     static func draw(_ result: TPDResult, options: OverlayOptions, in context: CGContext,
                      size: CGSize, style: OverlayStyle? = nil) {
         let style = style ?? .fitting(width: size.width)
-        let geometry = OverlayGeometry(result: result, options: options, size: size, style: style) {
-            let t = typeset($0, $1); return CGSize(width: t.width, height: t.ascent + t.descent)
-        }
-        draw(geometry, in: context, style: style)
+        draw(OverlayGeometry(result: result, options: options, size: size, style: style),
+             in: context, style: style)
     }
 
     static func draw(_ geometry: OverlayGeometry, in context: CGContext, style: OverlayStyle) {

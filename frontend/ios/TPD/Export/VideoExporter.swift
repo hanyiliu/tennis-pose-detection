@@ -1,8 +1,8 @@
 //  VideoExporter.swift
 //  Burns the overlay into a copy of a clip: AVAssetReader -> inference -> OverlayRenderer ->
 //  AVAssetWriter. The engine, not the feature: the caller owns the picker, the progress UI and
-//  the PHPhotoLibrary save, and gets a finished file in the temp directory. Video only — the
-//  audio pass-through was cut for line budget and is the follow-up's first job.
+//  the PHPhotoLibrary save, and gets a finished file in the temp directory. The clip's audio, if
+//  it has any, is muxed across untouched by a second reader — see `AudioPass`.
 
 import AVFoundation
 import CoreGraphics
@@ -105,6 +105,9 @@ final class VideoExporter: @unchecked Sendable {
                                                            sourcePixelBufferAttributes: nil)
         guard writer.canAdd(input) else { throw VideoExportError.failed("input refused") }
         writer.add(input)
+        // Every input has to be attached before `startWriting`, so the audio side is wired up now
+        // and drained at the end. A silent clip simply has none.
+        let audio = try await AudioPass(of: asset, into: writer)
         let style = OverlayStyle.fitting(width: size.width)
         do {
             guard writer.startWriting() else { throw Self.failure(writer.error) }
@@ -130,10 +133,12 @@ final class VideoExporter: @unchecked Sendable {
             }
             guard reader.status != .failed else { throw Self.failure(reader.error) }
             input.markAsFinished()
+            try await audio?.drain(into: writer)
             await writer.finishWriting()
             guard writer.status == .completed else { throw Self.failure(writer.error) }
         } catch {
             reader.cancelReading()
+            audio?.reader.cancelReading()
             writer.cancelWriting()  // deletes the partial file; the remove covers an earlier fail
             try? FileManager.default.removeItem(at: outputURL)
             throw error
@@ -173,5 +178,52 @@ final class VideoExporter: @unchecked Sendable {
 
     private static func failure(_ error: Error?) -> VideoExportError {
         .failed(error?.localizedDescription ?? "no further detail")
+    }
+}
+
+/// The audio half of a run. `outputSettings: nil` at **both** ends — reader output and writer
+/// input — is the whole trick: the reader hands back the track's compressed packets and the writer
+/// takes them verbatim, so the audio is MUXED into the new file rather than decoded and re-encoded.
+/// That keeps it sample-accurate and generation-loss-free, and costs a fraction of a second next to
+/// the inference pass. It needs a reader of its own because the video side's reader is an
+/// `AVAssetReaderVideoCompositionOutput` over the same asset, and one `AVAssetReader` cannot mix a
+/// composition output with a raw track output.
+private struct AudioPass {
+    let reader: AVAssetReader
+    let output: AVAssetReaderTrackOutput
+    let input: AVAssetWriterInput
+
+    /// `nil` for a clip with no audio track, which is most simulator fixtures and any muted export.
+    init?(of asset: AVAsset, into writer: AVAssetWriter) async throws {
+        guard let track = try await asset.loadTracks(withMediaType: .audio).first else { return nil }
+        reader = try AVAssetReader(asset: asset)
+        output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+        // The hint is what lets the writer accept an input it will never be told the format of.
+        input = AVAssetWriterInput(mediaType: .audio, outputSettings: nil,
+                                   sourceFormatHint: try await track.load(.formatDescriptions).first)
+        input.expectsMediaDataInRealTime = false
+        guard reader.canAdd(output), writer.canAdd(input) else {
+            throw VideoExportError.failed("the clip's audio cannot be passed through")
+        }
+        reader.add(output)
+        writer.add(input)
+    }
+
+    /// Drained after the video pass rather than interleaved with it: an `AVAssetWriter` accepts its
+    /// tracks in any order, and running one reader at a time keeps two decode sessions off the same
+    /// file. Cancellation lands here too, so a cancelled export still tears the whole run down.
+    func drain(into writer: AVAssetWriter) async throws {
+        guard reader.startReading() else { throw VideoExportError.failed("the audio reader stalled") }
+        while let sample = output.copyNextSampleBuffer() {
+            try Task.checkCancellation()
+            while !input.isReadyForMoreMediaData { try await Task.sleep(nanoseconds: 2_000_000) }
+            guard input.append(sample) else {
+                throw VideoExportError.failed(writer.error?.localizedDescription ?? "audio refused")
+            }
+        }
+        guard reader.status != .failed else {
+            throw VideoExportError.failed(reader.error?.localizedDescription ?? "audio read failed")
+        }
+        input.markAsFinished()
     }
 }
