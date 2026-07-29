@@ -34,12 +34,18 @@ actor InferenceWorker {
     /// Display rasterization only. Pointedly *not* the engine's context, whose
     /// colour management is switched off for numeric parity with the Python
     /// pipeline — those settings are for matching floats, not for looking right.
-    private let display = CIContext()
+    ///
+    /// Built in `load()` for the same reason `engine` is: as a stored property it
+    /// would be initialized by the synthesized `init`, which runs in the caller's
+    /// isolation domain — so `CIContext()` would be constructed on main. Smaller
+    /// than the model load, same trap.
+    private var display: CIContext?
 
     /// Loads both Core ML models, off the main actor. Idempotent, so a caller
     /// re-entering the loop after a failure retries the load rather than
     /// assuming it already happened.
     func load() throws {
+        if display == nil { display = CIContext() }
         guard engine == nil else { return }
         engine = try TPDInferenceEngine()
         // Cheap standing proof: if the load ever migrates back into `init` this
@@ -55,7 +61,7 @@ actor InferenceWorker {
         // Cheap after the first call, and it keeps the engine's existence an
         // invariant of this method rather than of the caller's call order.
         try load()
-        guard let engine else { return nil }
+        guard let engine, let display else { return nil }
         let image = CIImage(cvPixelBuffer: frame.pixelBuffer)
         let result = try engine.predict(frame: image)
         guard let raster = display.createCGImage(image, from: image.extent) else { return nil }
