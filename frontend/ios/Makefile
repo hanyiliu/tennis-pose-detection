@@ -13,7 +13,11 @@ TOOLS       := tools
 # would land inside the `sources: [TPD]` glob and get bundled twice.
 MODELS_DIR  ?= TPD/Models
 SRC_DIRS    := TPD TPDTests
-SIM_DEVICE  ?= iPhone 16
+# Hardcoding a device name rots: this defaulted to "iPhone 15", was bumped to "iPhone 16",
+# and Xcode 26.5 ships neither -- its newest set starts at iPhone 17. Ask simctl instead, and
+# override with `make build SIM_DEVICE="iPhone 17 Pro"` to pin one.
+SIM_DEVICE  ?= $(shell xcrun simctl list devices available 2>/dev/null | \
+                 sed -n 's/^ *\(iPhone[^(]*\) (.*/\1/p' | sed 's/ *$$//' | tail -1)
 CONFIG      ?= Debug
 
 .PHONY: all venv export parity generate lint build clean
@@ -103,6 +107,13 @@ build: generate
 		echo "       Until then use 'make lint' as the Swift gate."; \
 		exit 1; \
 	fi
+	@if [ -z '$(SIM_DEVICE)' ]; then \
+		echo "ERROR: no iOS simulator device found. The runtime is a separate download:"; \
+		echo "         xcodebuild -downloadPlatform iOS"; \
+		echo "       Then re-run, or pin one with SIM_DEVICE=\"iPhone 17 Pro\"."; \
+		exit 1; \
+	fi
+	@echo "building for simulator: $(SIM_DEVICE)"
 	xcodebuild -project TPD.xcodeproj -scheme TPD -configuration $(CONFIG) \
 		-destination 'platform=iOS Simulator,name=$(SIM_DEVICE)' \
 		-derivedDataPath build/DerivedData build
