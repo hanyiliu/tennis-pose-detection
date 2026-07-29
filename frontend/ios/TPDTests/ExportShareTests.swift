@@ -1,9 +1,8 @@
 //  ExportShareTests.swift
 //  The parts of Share that are pure logic: which frames the export gets for free from the
-//  preview's cache, that add-only authorization gates the write, and that a refused save keeps
-//  the finished file so a grant costs one tap rather than another export. The end-to-end run —
-//  a real clip through a real export into the camera roll — is verified on the simulator; it
-//  costs ~9.7 s a frame, which is not a suite anybody would run.
+//  preview's cache, that add-only authorization gates the write, and that a failed save keeps
+//  the finished file. The end-to-end run — a real clip through a real export into the camera
+//  roll — is verified on the simulator; at ~7 s a frame it is not a suite anybody would run.
 
 import CoreGraphics
 import Photos
@@ -41,49 +40,57 @@ final class ExportShareTests: XCTestCase {
     }
 
     /// Add-only authorization gates the write, and `.limited` counts as a grant: under
-    /// `.addOnly` it is one permission reported two ways, and refusing it would block a user
-    /// who has said yes. A refusal must not reach `performChanges` at all.
+    /// `.addOnly` it is one permission reported two ways. A refusal must not reach
+    /// `performChanges` at all, and `requestAccess` must reach the same verdict alone — the
+    /// export asks it up front, before spending minutes it would then have to throw away.
     func testTheSaverWritesOnlyOnceAddAccessIsGranted() async throws {
         for status in [PHAuthorizationStatus.authorized, .limited] {
             let written = Box<URL?>(nil)
-            try await PhotoLibrarySaver(authorize: { status },
-                                        write: { written.value = $0 }).save(Self.fixture)
+            let saver = PhotoLibrarySaver(authorize: { status }, write: { written.value = $0 })
+            try await saver.requestAccess()
+            try await saver.save(Self.fixture)
             XCTAssertEqual(written.value, Self.fixture, "status \(status.rawValue) did not write")
         }
         for status in [PHAuthorizationStatus.denied, .restricted, .notDetermined] {
             let written = Box<URL?>(nil)
-            let thrown = await error(PhotoLibrarySaver(authorize: { status },
-                                                       write: { written.value = $0 }))
-            XCTAssertEqual(thrown, .notAuthorized, "status \(status.rawValue) was accepted")
+            let saver = PhotoLibrarySaver(authorize: { status }, write: { written.value = $0 })
+            await assertThrows(.notAuthorized, "status \(status.rawValue)") {
+                try await saver.requestAccess()
+            }
+            await assertThrows(.notAuthorized, "status \(status.rawValue)") {
+                try await saver.save(Self.fixture)
+            }
             XCTAssertNil(written.value, "status \(status.rawValue) still wrote to the library")
         }
         let refused = CocoaError(.fileNoSuchFile)
-        let thrown = await error(PhotoLibrarySaver(authorize: { .authorized },
-                                                   write: { _ in throw refused }))
-        XCTAssertEqual(thrown, .failed(refused.localizedDescription))
+        await assertThrows(.failed(refused.localizedDescription), "a refused write") {
+            try await PhotoLibrarySaver(authorize: { .authorized },
+                                        write: { _ in throw refused }).save(Self.fixture)
+        }
     }
 
-    /// The recovery this codebase has got wrong once already: "fix it in Settings" is honest
-    /// only if coming back works. The exported file is kept on failure, so a retry is one
-    /// `performChanges`; it is deleted only once the asset is really in the library.
+    /// A save that fails for any reason other than authorization must keep the exported file:
+    /// re-running `performChanges` is seconds and re-running the export is minutes. It is
+    /// deleted only once the asset is really in the library. (An *authorization* refusal is
+    /// caught before the export instead — granting it in Settings relaunches the app.)
     @MainActor
-    func testARefusedSaveKeepsTheFileAndRetryingAfterAGrantSavesAndCleansUp() async {
+    func testAFailedSaveKeepsTheFileAndRetryingSavesAndCleansUp() async {
         let file = scratchURL()
         FileManager.default.createFile(atPath: file.path, contents: Data([0]))
-        let granted = Box(false)
-        let model = ExportViewModel(saver: PhotoLibrarySaver(
-            authorize: { granted.value ? .authorized : .denied }, write: { _ in }))
+        let healthy = Box(false)
+        let model = ExportViewModel(saver: PhotoLibrarySaver(authorize: { .authorized }, write: { _ in
+            if !healthy.value { throw CocoaError(.fileWriteOutOfSpace) }
+        }))
         await model.store(file)
 
-        guard case .failed(let message) = model.phase else {
-            return XCTFail("a denied save surfaced \(model.phase), not a failure")
+        guard case .failed = model.phase else {
+            return XCTFail("a failed save surfaced \(model.phase), not a failure")
         }
-        XCTAssertTrue(message.contains("Settings"), "the denial message names no way out")
-        XCTAssertEqual(model.exported, file, "the export was thrown away on a refused save")
+        XCTAssertEqual(model.exported, file, "the export was thrown away on a failed save")
         XCTAssertTrue(FileManager.default.fileExists(atPath: file.path),
                       "the file a retry needs was deleted")
 
-        granted.value = true
+        healthy.value = true
         model.retrySave()
         for _ in 0..<50 where model.phase != .saved { try? await Task.sleep(nanoseconds: 20_000_000) }
         XCTAssertEqual(model.phase, .saved)
@@ -110,10 +117,14 @@ final class ExportShareTests: XCTestCase {
         return url
     }
 
-    /// `nil` means the save was allowed through, which every caller here treats as a failure.
-    private func error(_ saver: PhotoLibrarySaver) async -> PhotoLibrarySaveError? {
-        do { try await saver.save(Self.fixture); return nil } catch {
-            return error as? PhotoLibrarySaveError
+    private func assertThrows(_ expected: PhotoLibrarySaveError, _ what: String,
+                              file: StaticString = #filePath, line: UInt = #line,
+                              _ body: () async throws -> Void) async {
+        do {
+            try await body()
+            XCTFail("\(what) was accepted", file: file, line: line)
+        } catch {
+            XCTAssertEqual(error as? PhotoLibrarySaveError, expected, what, file: file, line: line)
         }
     }
 

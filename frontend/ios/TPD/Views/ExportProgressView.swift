@@ -1,16 +1,16 @@
 //  ExportProgressView.swift
 //  Share: burn the overlay the user is looking at into the clip, then put the result in the
-//  camera roll. Inference dominates — ~9.7 s per analysed frame on this simulator — so this
-//  screen exists to make that wait honest and to let the user out of it.
+//  camera roll. Inference dominates — 7-10 s per analysed frame here — so this screen exists to
+//  make that wait honest and to let the user out of it.
 
 import Foundation
 import Observation
 import SwiftUI
 
 /// What this presentation has already analysed, as a value an export can carry off the main
-/// actor. `ResultCache` is `@MainActor` and `VideoExporter`'s `analyze` closure is neither
-/// async nor isolated, so it is snapshotted once at Share rather than consulted live: a frame
-/// analysed *during* an export is missed, which beats hopping actors in the exporter's loop.
+/// actor. `ResultCache` is `@MainActor` and `VideoExporter`'s `analyze` closure is neither async
+/// nor isolated, so it is snapshotted once at Share: a frame analysed *during* an export is
+/// missed, which beats hopping actors inside the exporter's loop.
 struct ResultSnapshot: Sendable {
     var frameRate: Double = 30
     var entries: [Int: TPDResult] = [:]
@@ -37,9 +37,9 @@ final class ExportTally: @unchecked Sendable {
 @MainActor
 @Observable
 final class ExportViewModel {
-    /// `cancelling` is a state of its own because a cancel lands only at the next frame
-    /// boundary and one frame is ~9.7 s: a card that dismissed instantly would be claiming a
-    /// stop that has not happened yet.
+    /// `cancelling` is a state of its own because a cancel lands only at the next frame boundary
+    /// and one frame is ~7-10 s: a card that dismissed instantly would be claiming a stop that
+    /// has not happened yet.
     enum Phase: Equatable { case exporting, cancelling, cancelled, saving, saved, failed(String) }
 
     private(set) var phase: Phase = .exporting
@@ -65,22 +65,21 @@ final class ExportViewModel {
     /// Cooperative, and the only exit that leaves nothing behind: `VideoExporter` checks
     /// cancellation each frame and tears reader, writer and half-written file down before the
     /// error escapes. Also the teardown `onDisappear` calls, so leaving mid-export stops the
-    /// work and an export walked away from is deleted rather than left in the temp directory.
+    /// work and bins an export the user never saved.
     func stop() {
         task?.cancel()
         if phase == .exporting { phase = .cancelling }
         if let url = exported { try? FileManager.default.removeItem(at: url); exported = nil }
     }
 
-    /// The recovery half of a refused save.
+    /// Retries the save alone, which is seconds against the minutes a re-export would be.
     func retrySave() {
         guard task == nil, let url = exported else { return }
         task = Task { [weak self] in await self?.store(url) }
     }
 
-    /// Authorize, add, then delete the temp copy — and only then, so a failure anywhere leaves
-    /// the file for `retrySave`. Internal, not private, so a test can drive the save half
-    /// alone; in the app there is always a minutes-long export in front of it.
+    /// Add, then delete the temp copy — and only then, so a failure anywhere leaves the file for
+    /// `retrySave`. Internal, not private, so a test can drive the save half alone.
     func store(_ url: URL) async {
         exported = url
         phase = .saving
@@ -103,6 +102,9 @@ final class ExportViewModel {
         defer { watcher.cancel(); task = nil }
         let tally = self.tally
         do {
+            // Permission first, inference second: the other way round a refusal lands after
+            // minutes of burn-in that no retry can hand back. See `requestAccess`.
+            try await saver.requestAccess()
             // The app's one engine, not a second pair of Core ML models: `lend` hands over the
             // instance `StillInferenceWorker` already loaded, behind the lock every caller
             // now shares.

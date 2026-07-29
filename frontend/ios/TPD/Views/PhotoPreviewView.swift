@@ -101,13 +101,13 @@ struct PhotoPreviewView: View {
 
     /// Bottom-left, the slot the camera roll button occupies on the live view. Live
     /// only over a movie — a still has no clip to burn an overlay into — and dimmed
-    /// rather than hidden, so the control does not vanish between two picks.
+    /// rather than hidden, so the control does not vanish between two picks. The
+    /// toggles are read at the tap, so what is burned in is what is on screen and
+    /// changing them mid-export cannot rewrite it.
     private var shareButton: some View {
         let url: URL? = if case .video(let url) = model.stage { url } else { nil }
         return Button {
             guard let url else { return }
-            // The toggles are read at the tap, so what is burned in is what is on
-            // screen, and changing them mid-export cannot rewrite it.
             let started = ExportViewModel()
             started.start(source: url, overlay: model.overlay, snapshot: video.analysed)
             export = started

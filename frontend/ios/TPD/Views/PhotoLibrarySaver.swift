@@ -8,14 +8,15 @@ import Photos
 enum PhotoLibrarySaveError: Error, Equatable, LocalizedError {
     case notAuthorized, failed(String)
 
-    /// The denial message names the fix *and* promises the retry is cheap, because it is: the
-    /// caller keeps the exported file, so coming back from Settings costs one tap.
+    /// The denial message names the fix and says what granting it costs, rather than promising
+    /// an in-app retry: **iOS relaunches the app when a Photos switch changes in Settings**, as
+    /// measured here — the process died the instant access was revoked.
     var errorDescription: String? {
         switch self {
         case .notAuthorized:
-            return "TPD is not allowed to add to your photo library. Turn on Add Photos Only "
-                + "for TPD in Settings › Privacy & Security › Photos, then tap Save again — the "
-                + "overlaid video is still here, so nothing has to be analysed twice."
+            return "TPD cannot add to your photo library, so there is nothing to export to. "
+                + "Turn on Add Photos Only for TPD in Settings › Privacy & Security › Photos; "
+                + "iOS restarts TPD when you do, then pick the clip and tap Share again."
         case .failed(let why): return "The camera roll refused the file: \(why)"
         }
     }
@@ -40,14 +41,20 @@ struct PhotoLibrarySaver: Sendable {
             }
         })
 
-    /// `.authorized` and `.limited` both permit an add — under add-only they are one grant
-    /// reported two ways, and treating `.limited` as a refusal would block a user who said yes.
-    /// The status is bound once: authorizing twice would put a second prompt on screen.
-    func save(_ url: URL) async throws {
+    /// The authorization half alone, so the caller can ask **before** the export rather than
+    /// after it: a refusal 100 s in has already cost the whole burn-in, and no in-app retry can
+    /// hand that back because granting it in Settings relaunches the app. `.authorized` and
+    /// `.limited` both permit an add — under add-only they are one grant reported two ways —
+    /// and the status is bound once, since authorizing twice shows a second prompt.
+    func requestAccess() async throws {
         let status = await authorize()
         guard status == .authorized || status == .limited else {
             throw PhotoLibrarySaveError.notAuthorized
         }
+    }
+
+    func save(_ url: URL) async throws {
+        try await requestAccess()
         do {
             try await write(url)
         } catch {
