@@ -1,21 +1,17 @@
 //  OverlayRenderer.swift
 //  The overlay's GEOMETRY, and the CoreGraphics rasterizer the exporter draws with.
-//
-//  `OverlayGeometry` is meant to be the one place box/dot/pill placement is computed: two
-//  drawing paths drift, and the drift stays invisible until someone diffs a screenshot against
-//  an exported frame. `FrameFit` and the engine's single application of
-//  `LetterboxMath.letterboxToFrame` are already shared; `OverlayCanvas` keeps its own copy of
-//  the arithmetic below, out of scope here — migrating it is the next PR's job.
+//  `OverlayGeometry` is meant to be the one place box/dot/pill placement is computed: two drawing
+//  paths drift, and the drift stays invisible until someone diffs a screenshot against an exported
+//  frame. `OverlayCanvas` still keeps its own copy — migrating it is the next PR's job.
 
 import CoreGraphics
 import CoreText
 import Foundation
 import UIKit
 
-/// Weights for one overlay pass — never positions, which come from `FrameFit`. The live view
-/// draws into view points on a ~390 pt phone and the exporter into the video's own pixels, so
-/// at 1080 wide the live constants would be hairlines under tiny type. `fitting(width:)`
-/// never scales *down*: a small export keeps the live weight.
+/// Weights for one overlay pass — never positions, which come from `FrameFit`. The live view draws
+/// into view points on a ~390 pt phone and the exporter into the video's pixels, so at 1080 wide
+/// the live constants would be hairlines under tiny type. `fitting` never scales *down*.
 struct OverlayStyle: Equatable, Sendable {
     var scale: CGFloat = 1
     var lineWidth: CGFloat { 2.5 * scale }
@@ -24,26 +20,21 @@ struct OverlayStyle: Equatable, Sendable {
     var boxCornerRadius: CGFloat { 4 * scale }
     var margin: CGFloat { 6 * scale }
     var pillPadding: CGSize { CGSize(width: 20 * scale, height: 10 * scale) }
-
     /// 390 is the canvas width `OverlayCanvas`'s constants were chosen against.
     static func fitting(width: CGFloat) -> OverlayStyle { .init(scale: max(1, width / 390)) }
 }
 
-/// Everything the overlay draws, resolved to destination coordinates and holding no drawing
-/// API — so a `Canvas` and a `CGContext` share one computation while rasterizing differently,
-/// and the tests assert placement without rendering a pixel.
+/// Everything the overlay draws, in destination coordinates and holding no drawing API: a
+/// `Canvas` and a `CGContext` share one computation, and tests assert placement without pixels.
 struct OverlayGeometry: Equatable {
     struct Dot: Equatable { var center: CGPoint; var radius: CGFloat }
     struct Pill: Equatable { var rect: CGRect; var text: String; var fontSize: CGFloat }
-    /// `box` is `nil` with its toggle off; the pill still hangs off it, since hiding the
-    /// outline must not move the reading.
+    /// `nil` with its toggle off; the pill still hangs off it, so hiding the outline moves nothing.
     var box: CGRect?
     var dots: [Dot] = []
     var pill: Pill?
-
     /// `measure` is the one thing the rasterizers cannot share — SwiftUI resolves a `Text`,
-    /// CoreGraphics lays out a `CTLine` — so it is injected and everything downstream of it
-    /// (padding, clamping, the flip) is decided once, here.
+    /// CoreGraphics a `CTLine` — so it is injected and everything downstream decided once, here.
     init(result: TPDResult, options: OverlayOptions, size: CGSize,
          style: OverlayStyle = OverlayStyle(), measure: (String, CGFloat) -> CGSize) {
         guard result.frameSize.width > 0, result.frameSize.height > 0 else { return }
@@ -51,8 +42,7 @@ struct OverlayGeometry: Equatable {
         let bounds = fit.map(result.bbox)
         if options.boundingBox { box = bounds }
         if options.keypoints {
-            // The backend's `visibility <= 0` skip: a channel that never fired must not
-            // be drawn at its clamped corner.
+            // The backend's `visibility <= 0` skip: a channel that never fired must not be drawn.
             dots = result.drawableKeypoints.map {
                 Dot(center: fit.map($0.position), radius: style.dotRadius)
             }
@@ -81,11 +71,10 @@ struct OverlayGeometry: Equatable {
     }
 }
 
-/// Rasterizes an `OverlayGeometry`. The context must already be **top-left-origin** — the
-/// space `TPDResult` is expressed in, which is what `VideoExporter` flips its bitmap context
-/// into; forgetting that mirrors the overlay rather than crashing. The palette is sRGB
-/// literals because `LiveCameraView` pins `.preferredColorScheme(.dark)`: these are the dark
-/// systemYellow and systemCyan it shows, and a literal needs no trait collection off main.
+/// Rasterizes an `OverlayGeometry`. The context must already be **top-left-origin** — the space
+/// `TPDResult` is expressed in, which is what `VideoExporter` flips its bitmap context into;
+/// forgetting that mirrors the overlay rather than crashing. The palette is sRGB literals because
+/// `LiveCameraView` pins dark mode, and a literal needs no trait collection off main.
 enum OverlayRenderer {
     static let boxColor = CGColor(srgbRed: 1, green: 0.839, blue: 0.039, alpha: 1)
     static let dotColor = CGColor(srgbRed: 0.392, green: 0.824, blue: 1, alpha: 1)
@@ -97,8 +86,7 @@ enum OverlayRenderer {
                      size: CGSize, style: OverlayStyle? = nil) {
         let style = style ?? .fitting(width: size.width)
         let geometry = OverlayGeometry(result: result, options: options, size: size, style: style) {
-            let text = typeset($0, $1)
-            return CGSize(width: text.width, height: text.ascent + text.descent)
+            let t = typeset($0, $1); return CGSize(width: t.width, height: t.ascent + t.descent)
         }
         draw(geometry, in: context, style: style)
     }
@@ -125,8 +113,7 @@ enum OverlayRenderer {
                                cornerHeight: pill.rect.height / 2, transform: nil))
         context.fillPath()
         let text = typeset(pill.text, pill.fontSize)
-        // The CTM's y points down here, so the glyphs need the opposite flip to come out
-        // upright; the baseline then sits (ascent - descent) / 2 below the pill's centre.
+        // The CTM's y points down here, so the glyphs need the opposite flip to come out upright.
         context.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
         context.textPosition = CGPoint(x: pill.rect.midX - text.width / 2,
                                        y: pill.rect.midY + (text.ascent - text.descent) / 2)

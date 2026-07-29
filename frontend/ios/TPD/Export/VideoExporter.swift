@@ -1,19 +1,15 @@
 //  VideoExporter.swift
 //  Burns the overlay into a copy of a clip: AVAssetReader -> inference -> OverlayRenderer ->
 //  AVAssetWriter. The engine, not the feature: the caller owns the picker, the progress UI and
-//  the PHPhotoLibrary save, and gets a finished file in the temp directory.
-//
-//  SCOPE: video only. Copying the audio track through untouched (a second AVAssetReader,
-//  `outputSettings: nil` both ends, drained after the video pass) was written and tested, then
-//  cut for this PR's line budget — the follow-up should add it back first.
+//  the PHPhotoLibrary save, and gets a finished file in the temp directory. Video only — the
+//  audio pass-through was cut for line budget and is the follow-up's first job.
 
 import AVFoundation
 import CoreGraphics
 import Foundation
 
-/// Serializes the non-`Sendable` engine so one instance can cross into an export running off
-/// the caller's actor — `TPDInferenceEngine` asks for exactly this, one instance with calls
-/// serialized, and the export calls it from a single task, so the lock never contends.
+/// Serializes the non-`Sendable` engine so one instance can cross into an export off the caller's
+/// actor — what `TPDInferenceEngine` asks for; one task calls it, so the lock never contends.
 final class SerializedInferenceEngine: @unchecked Sendable {
     private let lock = NSLock()
     private let engine: TPDInferenceEngine
@@ -35,34 +31,37 @@ enum VideoExportError: Error, Equatable, LocalizedError {
     }
 }
 
-final class VideoExporter: Sendable {
+/// `@unchecked` covers `observers` alone — every read and write of it goes through `lock`.
+final class VideoExporter: @unchecked Sendable {
     struct Configuration: Sendable {
         /// The four switches `ToggleBar` drives, burned in permanently.
         var overlay = OverlayOptions()
-        /// Run the model on every Nth frame and reuse its result in between; 1 is every
-        /// frame. **Default 3.** Inference dominates absolutely — on the booted simulator
-        /// (Debug, x86_64 host) one pass over a 608x1080 frame costs ~9.7 s against ~10 ms for
-        /// the draw — so this dial *is* the export time, and costs little accuracy: at 30 fps,
-        /// 3 still re-reads every 100 ms, inside the ~150 ms a stroke phase lasts.
+        /// Run the model on every Nth frame and reuse its result in between; 1 is every frame.
+        /// **Default 3.** Inference dominates absolutely — ~9.7 s for one 608x1080 frame on the
+        /// booted simulator against ~10 ms to draw — so this dial *is* the export time, at
+        /// little cost: at 30 fps, 3 still re-reads inside the ~150 ms a stroke phase lasts.
         var inferenceCadence = 3
         /// Defaults to a fresh .mp4 in `FileManager.temporaryDirectory`.
         var outputURL: URL?
     }
 
-    /// 0...1, newest-wins, finished when the export ends however it ends. Iterate it *before*
-    /// calling `export`: the buffer holds one value, so a late consumer sees the current
-    /// fraction but none of the earlier ones.
-    let progress: AsyncStream<Double>
-    private let continuation: AsyncStream<Double>.Continuation
+    /// 0...1, newest-wins. Every access vends a **fresh** stream, which follows the run in flight
+    /// — or the next to start — and is finished when that run ends however it ends, an early
+    /// throw included: a progress UI awaiting one never hangs, and the instance stays reusable.
+    /// Read it *before* calling `export`, since the buffer holds one value. Runs are sequential:
+    /// two overlapping on one instance would share, and cut short, a single set of streams.
+    var progress: AsyncStream<Double> {
+        AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            self.lock.withLock { self.observers.append(continuation) }
+        }
+    }
+    private let lock = NSLock()
+    private var observers: [AsyncStream<Double>.Continuation] = []
     private let configuration: Configuration
     private static let bgra = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
 
-    init(configuration: Configuration = Configuration()) {
-        self.configuration = configuration
-        let made = AsyncStream.makeStream(of: Double.self, bufferingPolicy: .bufferingNewest(1))
-        (progress, continuation) = (made.stream, made.continuation)
-    }
-    deinit { continuation.finish() }
+    init(configuration: Configuration = Configuration()) { self.configuration = configuration }
+    deinit { endProgress() }  // covers a caller that reads `progress` and never exports
 
     func export(from source: URL, using engine: SerializedInferenceEngine) async throws -> URL {
         try await export(from: source, analyze: { try engine.predict($0) })
@@ -72,15 +71,16 @@ final class VideoExporter: Sendable {
     /// are torn down and the half-written file deleted before `CancellationError` escapes.
     func export(from source: URL,
                 analyze: @Sendable (VideoFrame) throws -> TPDResult) async throws -> URL {
+        // The one place a run's streams end, so no exit can skip it: several of the failures
+        // below throw above the do/catch, and each used to strand every consumer for good.
+        defer { endProgress() }
         let asset = AVURLAsset(url: source)
         guard let track = try await asset.loadTracks(withMediaType: .video).first else {
             throw VideoExportError.noVideoTrack(source)
         }
-        // The device `VideoFileFrameSource` uses, for the same reason: a video composition
-        // bakes the track's `preferredTransform` into the decoded buffers. A raw track output
-        // hands back the *encoded* frame — sideways for any iPhone portrait recording — so
-        // the model would read a rotated player and the overlay would land on a rotated
-        // picture. Both now see one upright frame; the writer needs no transform of its own.
+        // The device `VideoFileFrameSource` uses, for the same reason: a video composition bakes
+        // the track's `preferredTransform` into the decoded buffers, where a raw track output
+        // hands back the *encoded* frame — sideways for any iPhone portrait recording.
         let composition = try await AVVideoComposition.videoComposition(withPropertiesOf: asset)
         let size = composition.renderSize
         let width = Int(size.width.rounded()), height = Int(size.height.rounded())
@@ -97,11 +97,10 @@ final class VideoExporter: Sendable {
         try? FileManager.default.removeItem(at: outputURL)
         let writer = try AVAssetWriter(url: outputURL, fileType: .mp4)
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
-            AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: width, AVVideoHeightKey: height])
+            AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: width,
+            AVVideoHeightKey: height])
         input.expectsMediaDataInRealTime = false
-        // No `sourcePixelBufferAttributes`, so no pool: every buffer appended is one the
-        // reader decoded and we drew on in place; a pool would only add a copy per frame.
+        // No `sourcePixelBufferAttributes`, so no pool: a pool would add a copy per frame.
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input,
                                                            sourcePixelBufferAttributes: nil)
         guard writer.canAdd(input) else { throw VideoExportError.failed("input refused") }
@@ -120,21 +119,14 @@ final class VideoExporter: Sendable {
                 if index % cadence == 0 || cached == nil {
                     cached = try analyze(VideoFrame(pixelBuffer: frame, time: time))
                 }
-                if let cached {
-                    try Self.burn(cached, into: frame, options: configuration.overlay,
-                                  style: style, size: size)
-                }
-                // Appending while the input is not ready raises an ObjC exception rather
-                // than returning false, so this wait is mandatory; it doubles as the
-                // cancellation check for a writer that has stalled.
-                while !input.isReadyForMoreMediaData {
-                    try await Task.sleep(nanoseconds: 2_000_000)
-                }
-                guard adaptor.append(frame, withPresentationTime: time) else {
-                    throw Self.failure(writer.error)
-                }
+                if let cached { try Self.burn(cached, into: frame, options: configuration.overlay,
+                                              style: style, size: size) }
+                // Appending while not ready raises an ObjC exception rather than returning false.
+                while !input.isReadyForMoreMediaData { try await Task.sleep(nanoseconds: 2_000_000) }
+                guard adaptor.append(frame, withPresentationTime: time)
+                else { throw Self.failure(writer.error) }
                 index += 1
-                if duration > 0 { continuation.yield(min(time.seconds / duration, 1)) }
+                if duration > 0 { report(min(time.seconds / duration, 1)) }
             }
             guard reader.status != .failed else { throw Self.failure(reader.error) }
             input.markAsFinished()
@@ -142,20 +134,25 @@ final class VideoExporter: Sendable {
             guard writer.status == .completed else { throw Self.failure(writer.error) }
         } catch {
             reader.cancelReading()
-            // `cancelWriting` deletes the partial file; the remove covers a writer that
-            // failed before it ever owned one.
-            writer.cancelWriting()
+            writer.cancelWriting()  // deletes the partial file; the remove covers an earlier fail
             try? FileManager.default.removeItem(at: outputURL)
-            continuation.finish()
             throw error
         }
-        continuation.yield(1)
-        continuation.finish()
+        report(1)
         return outputURL
     }
 
-    /// Draws straight into the decoded frame: `copyNextSampleBuffer` hands over a buffer
-    /// nothing else holds, so mutating it in place is safe and saves a copy per frame.
+    private func report(_ fraction: Double) {
+        lock.withLock { observers }.forEach { $0.yield(fraction) }
+    }
+    /// Ends every stream vended for the run, unlocked: a termination handler runs inline here.
+    private func endProgress() {
+        let vended = lock.withLock { let all = observers; observers = []; return all }
+        vended.forEach { $0.finish() }
+    }
+
+    /// Draws straight into the decoded frame: `copyNextSampleBuffer` hands over a buffer nothing
+    /// else holds, so mutating it in place is safe.
     private static func burn(_ result: TPDResult, into buffer: CVPixelBuffer,
                              options: OverlayOptions, style: OverlayStyle, size: CGSize) throws {
         CVPixelBufferLockBaseAddress(buffer, [])
