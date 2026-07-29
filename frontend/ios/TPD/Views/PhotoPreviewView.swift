@@ -1,6 +1,6 @@
 //  PhotoPreviewView.swift
-//  The Photo Preview View: one picked still, its overlays, and the same four
-//  toggles the Live Camera View has.
+//  The Photo Preview View: one picked still or clip, its overlays, and the same
+//  four toggles the Live Camera View has.
 
 import SwiftUI
 
@@ -19,6 +19,9 @@ struct PhotoPreviewView: View {
     /// Fresh per presentation, which is what makes `.task` a once-per-pick load
     /// and what lets the models be released when the screen goes away.
     @State private var model = PreviewViewModel()
+    /// Owned here rather than inside `VideoPreview` because the scrub bar sits
+    /// *above* the toggle strip, and a bar in the picture layer would sit under.
+    @State private var video = VideoPreviewModel()
 
     var body: some View {
         ZStack {
@@ -27,9 +30,13 @@ struct PhotoPreviewView: View {
             VStack(spacing: 0) {
                 topBar
                 Spacer(minLength: 0)
-                // The toggles are meaningless over a spinner, a placeholder or an
-                // error, so the strip appears with the picture it controls.
-                if case .still = model.stage { controls }
+                if case .video = model.stage { scrubBar }
+                // The toggles are meaningless over a spinner or an error, so the
+                // strip appears with the picture it controls.
+                switch model.stage {
+                case .still, .video: controls
+                case .loading, .failed: EmptyView()
+                }
             }
         }
         .preferredColorScheme(.dark)
@@ -40,21 +47,12 @@ struct PhotoPreviewView: View {
     private var content: some View {
         switch model.stage {
         case .loading:
-            status(symbol: nil, title: "Preparing photo…",
-                   detail: "Downloading it from your library and running the model.")
+            status(symbol: nil, title: "Preparing…", detail: "Copying it out of your library.")
         case .still(let frame):
             FramePreview(image: frame.image)
             OverlayCanvas(result: frame.result, options: model.overlay)
-        case .video:
-            // **The scope line for this PR.** A picked movie is a real selection
-            // the picker is configured to allow (`.any(of: [.images, .videos])`),
-            // so refusing it at the picker would be a worse lie than saying this.
-            // Playback, the scrub bar and export are PR9/PR10; until then the
-            // honest screen is one that names what is missing.
-            status(symbol: "film", title: "Video preview is coming",
-                   detail: "TPD analyses stills today. Playback with overlays, the scrub bar and "
-                       + "export to your camera roll land in the next release. Pick a photo to "
-                       + "see the model run.")
+        case .video(let url):
+            VideoPreview(model: video, url: url, options: model.overlay)
         case .failed(let message):
             status(symbol: "exclamationmark.triangle", title: "Could not open this item",
                    detail: message)
@@ -80,6 +78,12 @@ struct PhotoPreviewView: View {
         }
         .padding(.horizontal, 14)
         .padding(.top, 8)
+    }
+
+    private var scrubBar: some View {
+        ScrubBar(model: video)
+            .padding(.horizontal, 16).padding(.vertical, 8)
+            .background(.black.opacity(0.55))
     }
 
     private var controls: some View {
