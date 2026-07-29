@@ -15,8 +15,13 @@ comparison modes, reported separately -- do not quote one's numbers as the other
     2+3, each stack using its OWN stage-1 bbox. Stage 1's fp16 error is sub-pixel (~3e-4
     normalized) but the bbox is *rounded to integers*, so the crop rectangle flips by a
     pixel on a good fraction of frames and the two stacks then see different pixels. The
-    bbox and the class decision are gated; the keypoint aggregates include the
-    rounding-affected frames and are reported as information, not asserted.
+    bbox and the class decision are gated, and so are the keypoints -- but only over the
+    frames whose two rounded rects came out **identical**, roughly 70% of them. There the
+    pixels really are the same, the rounding cannot be the culprit, and a relocated
+    resolvable peak is as much a defect as it is same-crop. The frames the rounding split
+    are accumulated separately and printed as ``[info] split-rect`` rows, gated by nothing:
+    over 40 seeds they carry 197 relocated peaks reaching 24x the resolvability floor,
+    which is the size of the noise that would have to be tolerated to gate them together.
 
 **Why the keypoint gate is prominence-aware.** A heatmap channel only *has* a location if
 its peak stands out. When the best value more than ``NEIGHBOR_RADIUS`` pixels away sits
@@ -63,8 +68,8 @@ from preprocessing.pil_preprocessing import (  # noqa: E402
 
 # --- gates -----------------------------------------------------------------------
 # Every constant is a measured worst case times a safety factor, and every gate prints its
-# measurement beside its limit so drift shows before it fails. Calibration sweep: 32 seeds
-# x {cpu, all} against the shipped export.
+# measurement beside its limit so drift shows before it fails. Calibration sweep: 40 seeds
+# x 8 inputs x {cpu, all} against the shipped export, 1280 inputs per mode.
 # A peak is a location only if it beats everything outside its own 3x3 by more than fp16
 # noise; inside that 3x3 a one-pixel slide is routine even for a sharp peak. That lead must
 # clear the larger of RESOLVE_ULPS fp16 ULPs at the channel's own peak and HEATMAP_NOISE,
@@ -81,15 +86,40 @@ MAX_RELOCATED = 0
 # 1.0 is 1.2e-7. Measured 6.0e-08.
 COORD_TOL = 1e-6
 # Raw max logit, not a probability, so it drifts further than the class probabilities do.
-# Measured 4.1e-02 same-crop.
+# Measured 4.1e-02 same-crop, 5.2e-02 over end-to-end's identical-rect frames.
 VIS_TOL = 1.5e-1
-# Measured 1.1e-01 over gradeable inputs -- where both stacks fed stage 3 keypoints agreeing
-# pixel for pixel, so the residue is entirely visibility drift amplified by the classifier.
-# Median 5e-13 and p99 1.3e-02: a few inputs sit on a steep part of the softmax and turn
-# 1e-02 of raw logit into 1e-01 of probability. Tightening it would only exclude those, so it
-# does double duty instead -- an input grades the classifier only when torch's OWN top-2 gap
-# exceeds it, leaving drift unable to flip a gradeable decision and any flip a real defect.
-PROB_TOL = 3e-1
+# An input grades the classifier only when torch's OWN top-2 gap clears this, so drift
+# cannot flip a gradeable decision and any flip is a real defect. Kept a separate constant
+# from PROB_TOL: which inputs are *admissible* is a property of the softmax's steepness,
+# while how far the converted graph may move a probability is a property of the conversion,
+# and collapsing the two makes tightening one silently re-pick the population the other is
+# measured over.
+CLASS_TIE_GAP = 3e-1
+# Max probability drift over gradeable inputs -- where both stacks fed stage 3 keypoints
+# agreeing pixel for pixel, so the residue is entirely visibility drift amplified by the
+# classifier. Two independent bounds pin this, and they meet:
+#   from below -- 947 gradeable inputs over 40 seeds x {cpu, all} x {same-crop, end-to-end}
+#     put the worst at 9.559e-02 (median 3e-11, p99 1.3e-02: nearly every input is exact and
+#     a handful sit on a steep part of the softmax, turning 1e-02 of raw logit into 1e-01 of
+#     probability). 1.5x that worst is 1.434e-01, so 1.5e-01 is the next clean value up.
+#   from above -- an argmax flip needs the top two to swap, i.e. the drifts on them to sum
+#     past CLASS_TIE_GAP. Both are bounded by this constant, so PROB_TOL <= CLASS_TIE_GAP/2
+#     = 1.5e-01 is exactly what makes "gradeable inputs never flip" hold arithmetically.
+# It was 3e-01, whose real detection floor measured +0.2919, so an injected +0.20 passed the
+# whole gate. At 1.5e-01 the floor is PROB_TOL minus whatever drift already sits on the class
+# the regression lands on, which makes it TARGET-DEPENDENT rather than a single number:
+# independently measured at +0.142 onto the runner-up and +0.1438 onto the argmax, i.e. the
+# range ~0.142-0.144 on the default config (a 40-seed sweep catches +0.140).
+#
+# TWO residual blind spots, both real, stated plainly so nobody reads this gate as total:
+#   1. On GRADEABLE inputs a stage-3-only regression under ~0.14 that never moves an argmax is
+#      invisible. Shrinking that means lowering CLASS_TIE_GAP too, which costs gradeable
+#      inputs, so it is documented rather than pushed.
+#   2. On inputs the gate EXCLUDES from grading, the probability blind spot is UNBOUNDED in
+#      magnitude, not ~0.14 -- nothing about their probabilities is checked at all. The
+#      defence is the gradeable-fraction floor below, which fails the run as vacuous when too
+#      few inputs are admissible; it is not a bound on what an excluded input may do.
+PROB_TOL = 1.5e-1
 # Normalized xywh out of stage 1. Measured 3.1e-04.
 BBOX_TOL = 5e-3
 # Too few gradeable inputs means nothing was compared: fail vacuous rather than green. Worst
@@ -265,15 +295,49 @@ def peak_prominence(heatmap: np.ndarray, radius: int) -> np.ndarray:
     return (peak - runner_up) / np.maximum(RESOLVE_ULPS * ulp, HEATMAP_NOISE)
 
 
-class Stats:
-    """Running worst cases over every input in one mode."""
+class Peaks:
+    """Keypoint aggregates over one subset of the inputs in a mode.
+
+    Two are kept per mode and never mixed. ``identical`` holds the inputs both stacks saw
+    the *same pixels* for -- every same-crop input, and in end-to-end the frames whose
+    integer crop rects matched -- and is the only one anything is asserted against.
+    ``split`` holds the end-to-end frames the rounding pulled apart, where a moved peak is
+    a different crop rather than a different graph.
+    """
 
     def __init__(self):
         self.inputs = self.channels = self.resolvable = self.relocated = 0
         self.worst_relocated = 0
         self.worst_prominence = 0.0      # prominence of the most prominent relocated channel
         self.worst_input = "-"
-        self.coord = self.vis = self.prob = self.bbox = 0.0
+        self.coord = self.vis = 0.0
+
+    def add(self, label, prominence, resolvable, relocated, moved, ref_kps, ml_kps):
+        self.inputs += 1
+        self.channels += prominence.size
+        self.resolvable += int(resolvable.sum())
+        gated_bad = int((resolvable & relocated).sum())
+        if gated_bad > self.worst_relocated:
+            self.worst_relocated, self.worst_input = gated_bad, label
+        self.relocated += gated_bad
+        if relocated.any():
+            self.worst_prominence = max(self.worst_prominence, float(prominence[relocated].max()))
+        exact = moved == 0
+        if exact.any():
+            delta = np.abs(ref_kps[:, :2] - ml_kps[:, :2])
+            self.coord = max(self.coord, float(delta[exact].max()))
+        self.vis = max(self.vis, float(np.max(np.abs(ref_kps[:, 2] - ml_kps[:, 2]))))
+        return gated_bad
+
+
+class Stats:
+    """Running worst cases over every input in one mode."""
+
+    def __init__(self):
+        self.inputs = 0
+        self.identical = Peaks()
+        self.split = Peaks()
+        self.prob = self.bbox = 0.0
         self.gradeable = self.class_agree = 0
         self.rect_equal = self.rect_total = 0
         self.nonfinite = []
@@ -299,26 +363,16 @@ class Stats:
         relocated = moved > NEIGHBOR_RADIUS
 
         self.inputs += 1
-        self.channels += prominence.size
-        self.resolvable += int(resolvable.sum())
-        gated_bad = int((resolvable & relocated).sum())
-        if gated_bad > self.worst_relocated:
-            self.worst_relocated, self.worst_input = gated_bad, label
-        self.relocated += gated_bad
-        if relocated.any():
-            self.worst_prominence = max(self.worst_prominence, float(prominence[relocated].max()))
-
-        exact = moved == 0
-        if exact.any():
-            delta = np.abs(ref_kps[:, :2] - ml_kps[:, :2])
-            self.coord = max(self.coord, float(delta[exact].max()))
-        self.vis = max(self.vis, float(np.max(np.abs(ref_kps[:, 2] - ml_kps[:, 2]))))
+        # The one branch that decides what is asserted and what is only counted.
+        bucket = self.identical if same_pixels else self.split
+        gated_bad = bucket.add(label, prominence, resolvable, relocated, moved, ref_kps, ml_kps)
 
         # Stage 3 mixes every keypoint into 76 of its 130 features, so only an input whose
         # keypoints fully agreed can grade the classifier -- and only when torch's own
         # decision is not itself a near tie.
         ordered = np.sort(ref_probs)
-        gradeable = same_pixels and not relocated.any() and (ordered[-1] - ordered[-2]) > PROB_TOL
+        gradeable = (same_pixels and not relocated.any()
+                     and (ordered[-1] - ordered[-2]) > CLASS_TIE_GAP)
         prob_delta = float(np.max(np.abs(ref_probs - ml_probs)))
         ref_class, ml_class = int(np.argmax(ref_probs)), int(np.argmax(ml_probs))
         if gradeable:
@@ -337,30 +391,36 @@ class Row:
         self.name, self.measured, self.limit, self.ok = name, measured, limit, ok
 
 
-def pose_rows(stats: Stats, keypoints_gated: bool) -> list:
-    """Rows shared by both modes. The class rows assert in both -- a gradeable input fed
-    stage 3 the same keypoints on both sides, which end-to-end also demands the same crop
-    rect. Only the keypoint aggregates are same-crop-only, where the rounding cannot be it.
-    """
-    def gate(value):
-        return value if keypoints_gated else None
+def pose_rows(stats: Stats, split_rows: bool) -> list:
+    """Rows shared by both modes.
 
-    resolvable_pct = 100.0 * stats.resolvable / max(stats.channels, 1)
+    Everything here is asserted against ``stats.identical`` -- the inputs both stacks saw
+    the same pixels for. Same-crop mode is entirely that by construction; end-to-end mode
+    is the frames whose two integer crop rects came out equal, and gating those is the
+    point: only the frames the rounding *split* have an innocent explanation for a moved
+    peak, and they are the only ones left ungated. *split_rows* appends them as clearly
+    labelled info, so the rounding's size stays visible instead of being folded into a
+    number something depends on.
+    """
+    gated = stats.identical
+    resolvable_pct = 100.0 * gated.resolvable / max(gated.channels, 1)
     floor = int(np.ceil(MIN_GRADEABLE_FRACTION * stats.inputs))
-    return [
+    rows = [
         Row("resolvable peaks relocated > 1px",
-            f"{stats.relocated}/{stats.resolvable} (worst {stats.worst_input})",
-            f"<= {MAX_RELOCATED}", gate(stats.relocated <= MAX_RELOCATED)),
+            f"{gated.relocated}/{gated.resolvable} (worst {gated.worst_input})",
+            f"<= {MAX_RELOCATED}",
+            # Zero resolvable channels would satisfy "<= 0" while comparing nothing.
+            gated.resolvable > 0 and gated.relocated <= MAX_RELOCATED),
         Row("closest call: prominence of a moved peak",
-            f"{stats.worst_prominence:.2f}x noise floor", "resolvable > 1.00"),
+            f"{gated.worst_prominence:.2f}x noise floor", "resolvable > 1.00"),
         Row("resolvable channels (input quality)",
-            f"{stats.resolvable}/{stats.channels} ({resolvable_pct:.1f}%)", "-"),
+            f"{gated.resolvable}/{gated.channels} ({resolvable_pct:.1f}%)", "-"),
         Row("ambiguous channels (ungated, watch it)",
-            f"{stats.channels - stats.resolvable}/{stats.channels}", "-"),
-        Row("keypoint coord max|d|, same-pixel channels", f"{stats.coord:.3e}",
-            f"< {COORD_TOL:g}", gate(stats.coord < COORD_TOL)),
-        Row("visibility max|d| (raw logit)", f"{stats.vis:.3e}",
-            f"< {VIS_TOL:g}", gate(stats.vis < VIS_TOL)),
+            f"{gated.channels - gated.resolvable}/{gated.channels}", "-"),
+        Row("keypoint coord max|d|, same-pixel channels", f"{gated.coord:.3e}",
+            f"< {COORD_TOL:g}", gated.coord < COORD_TOL),
+        Row("visibility max|d| (raw logit)", f"{gated.vis:.3e}",
+            f"< {VIS_TOL:g}", gated.vis < VIS_TOL),
         Row("gradeable inputs (keypoints agreed)",
             f"{stats.gradeable}/{stats.inputs}", f">= {floor}",
             stats.gradeable >= max(floor, 1)),
@@ -374,6 +434,18 @@ def pose_rows(stats: Stats, keypoints_gated: bool) -> list:
         Row("finite outputs (no NaN/Inf)", ", ".join(stats.nonfinite[:3]) or "clean",
             "clean", not stats.nonfinite),
     ]
+    if split_rows:
+        split = stats.split
+        rows += [
+            Row("[info] split-rect frames (own crop each)",
+                f"{split.inputs}/{stats.inputs} frames, {split.channels} channels", "-"),
+            Row("[info] split-rect peaks relocated", f"{split.relocated}/{split.resolvable}"
+                f" (worst {split.worst_input})", "-"),
+            Row("[info] split-rect moved-peak prominence",
+                f"{split.worst_prominence:.2f}x noise floor", "-"),
+            Row("[info] split-rect visibility max|d|", f"{split.vis:.3e}", "-"),
+        ]
+    return rows
 
 
 def run_same_crop(reference: Reference, coreml: CoreML, crops, label: str, stats, verbose):
@@ -468,7 +540,7 @@ def main() -> int:
         run_end_to_end(reference, coreml, frames, f"e2e  s{seed}", e2e, args.verbose)
 
     torch_sum, coreml_sum, (ref_class, ml_class) = same.probe
-    rows = pose_rows(same, keypoints_gated=True)
+    rows = pose_rows(same, split_rows=False)
     rows.append(
         Row("black-crop stage-3 overflow probe",
             f"sum(vis) {torch_sum:+.1f}/{coreml_sum:+.1f} class {ref_class}/{ml_class}",
@@ -483,10 +555,10 @@ def main() -> int:
         Row("stage-1 bbox max|d| (normalized)", f"{e2e.bbox:.3e}",
             f"< {BBOX_TOL:g}", e2e.bbox < BBOX_TOL),
         Row("identical integer crop rects", f"{e2e.rect_equal}/{e2e.rect_total}", "-"),
-    ] + pose_rows(e2e, keypoints_gated=False)
+    ] + pose_rows(e2e, split_rows=True)
     ok = print_table(
         f"END-TO-END  frame -> bbox -> crop -> stages 2+3  ({e2e.inputs} inputs)",
-        "each stack rounds its own crop rect, so the ungated rows measure that rounding",
+        "gated over the identical-rect frames only; [info] rows are the rounding's own noise",
         e2e_rows,
     ) and ok
 
