@@ -14,10 +14,12 @@ TOOLS       := tools
 MODELS_DIR  ?= TPD/Models
 SRC_DIRS    := TPD TPDTests
 # Hardcoding a device name rots: this defaulted to "iPhone 15", was bumped to "iPhone 16",
-# and Xcode 26.5 ships neither -- its newest set starts at iPhone 17. Ask simctl instead, and
-# override with `make build SIM_DEVICE="iPhone 17 Pro"` to pin one.
-SIM_DEVICE  ?= $(shell xcrun simctl list devices available 2>/dev/null | \
-                 sed -n 's/^ *\(iPhone[^(]*\) (.*/\1/p' | sed 's/ *$$//' | tail -1)
+# and Xcode 26.5 ships neither -- its newest set starts at iPhone 17. Empty means "ask simctl
+# in the recipe"; override with `make build SIM_DEVICE="iPhone 17 Pro"` to pin one.
+# The lookup deliberately lives in the recipe, not in a $(shell ...): the device list contains
+# literal parentheses, and any sed that matches them unbalances make's own paren counting and
+# fails the whole file with "unterminated call to function `shell'".
+SIM_DEVICE  ?=
 CONFIG      ?= Debug
 
 .PHONY: all venv export parity generate lint build clean
@@ -107,15 +109,23 @@ build: generate
 		echo "       Until then use 'make lint' as the Swift gate."; \
 		exit 1; \
 	fi
-	@if [ -z '$(SIM_DEVICE)' ]; then \
-		echo "ERROR: no iOS simulator device found. The runtime is a separate download:"; \
+	@set -eo pipefail; \
+	device='$(SIM_DEVICE)'; \
+	if [ -z "$$device" ]; then \
+		device=$$(xcrun simctl list devices available 2>/dev/null \
+			| sed -n 's/^ *iPhone/iPhone/p' | sed 's/ *(.*//' \
+			| sed 's/ *$$//' | grep . | tail -1 || true); \
+	fi; \
+	if [ -z "$$device" ]; then \
+		echo "ERROR: no iOS simulator device found. The runtime installs separately from the"; \
+		echo "       SDK, so a working xcode-select is not enough:"; \
 		echo "         xcodebuild -downloadPlatform iOS"; \
 		echo "       Then re-run, or pin one with SIM_DEVICE=\"iPhone 17 Pro\"."; \
 		exit 1; \
-	fi
-	@echo "building for simulator: $(SIM_DEVICE)"
+	fi; \
+	echo "building for simulator: $$device"; \
 	xcodebuild -project TPD.xcodeproj -scheme TPD -configuration $(CONFIG) \
-		-destination 'platform=iOS Simulator,name=$(SIM_DEVICE)' \
+		-destination "platform=iOS Simulator,name=$$device" \
 		-derivedDataPath build/DerivedData build
 
 clean:
