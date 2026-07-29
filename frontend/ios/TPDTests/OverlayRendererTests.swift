@@ -100,6 +100,31 @@ final class OverlayRendererTests: XCTestCase {
         XCTAssertTrue(decoded.overlaid, "no overlay stroke on the exported box's top edge")
     }
 
+    /// The audio pass-through. The fixture's track is genuine AAC — `AVAssetWriter` encodes it
+    /// from LPCM silence on the way in — so this exercises the compressed path the exporter muxes
+    /// across, not a convenient uncompressed one. Duration and track count alone would also pass
+    /// for audio that had been decoded and re-encoded, hence the format assertion.
+    func testExportMuxesTheClipsAudioTrackThroughUntouched() async throws {
+        let source = try await makeClip(frames: 24, audio: true)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let sourceTracks = try await AVURLAsset(url: source).loadTracks(withMediaType: .audio)
+        let want = try await XCTUnwrap(sourceTracks.first).load(.timeRange).duration.seconds
+        let exporter = VideoExporter(configuration: .init(inferenceCadence: 24))
+        let output = try await exporter.export(from: source) { [stub = result()] _ in stub }
+        defer { try? FileManager.default.removeItem(at: output) }
+        let tracks = try await AVURLAsset(url: output).loadTracks(withMediaType: .audio)
+        XCTAssertEqual(tracks.count, 1, "the export did not carry exactly one audio track")
+        let track = try XCTUnwrap(tracks.first)
+        let made = try await track.load(.timeRange).duration.seconds
+        XCTAssertEqual(made, want, accuracy: 0.05)
+        let formats = try await track.load(.formatDescriptions)
+        let format = try XCTUnwrap(formats.first)
+        XCTAssertEqual(format.mediaSubType, .mpeg4AAC, "the audio was re-encoded, not muxed")
+        // And the picture survived the second track: audio did not displace any video.
+        let decoded = try await decode(AVURLAsset(url: output))
+        XCTAssertEqual(decoded.frames, 24)
+    }
+
     /// The stream ends however the export ends, and the failures that throw before the writer
     /// exists are the ones that used to skip that, hanging a progress UI for good. The timeout
     /// keeps a regression a failure rather than a wedged suite.
@@ -156,8 +181,44 @@ final class OverlayRendererTests: XCTestCase {
         return (frames, overlaid)
     }
 
+    /// One buffer of 16-bit LPCM silence. The writer input it is handed is configured for AAC, so
+    /// AVFoundation encodes it, and the fixture ends up with a compressed track like a real clip's.
+    private func silence(seconds: Double, rate: Double = 44_100) throws -> CMSampleBuffer {
+        var asbd = AudioStreamBasicDescription(
+            mSampleRate: rate, mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: 2, mFramesPerPacket: 1, mBytesPerFrame: 2, mChannelsPerFrame: 1,
+            mBitsPerChannel: 16, mReserved: 0)
+        var format: CMAudioFormatDescription?
+        // Every status is checked: a half-built sample buffer does not fail an assertion later, it
+        // takes an ObjC exception out of `append` and the whole test host with it.
+        XCTAssertEqual(CMAudioFormatDescriptionCreate(
+            allocator: nil, asbd: &asbd, layoutSize: 0, layout: nil, magicCookieSize: 0,
+            magicCookie: nil, extensions: nil, formatDescriptionOut: &format), noErr)
+        let samples = Int(rate * seconds), bytes = samples * 2
+        var block: CMBlockBuffer?
+        // `AssureMemoryNow`: with a null memory block the allocation is otherwise deferred, and a
+        // sample buffer over unallocated storage is exactly the kind that takes the host down.
+        XCTAssertEqual(CMBlockBufferCreateWithMemoryBlock(
+            allocator: nil, memoryBlock: nil, blockLength: bytes, blockAllocator: nil,
+            customBlockSource: nil, offsetToData: 0, dataLength: bytes,
+            flags: kCMBlockBufferAssureMemoryNowFlag, blockBufferOut: &block), noErr)
+        XCTAssertEqual(CMBlockBufferFillDataBytes(with: 0, blockBuffer: try XCTUnwrap(block),
+                                                  offsetIntoDestination: 0, dataLength: bytes),
+                       noErr)
+        var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: CMTimeScale(rate)),
+                                        presentationTimeStamp: .zero, decodeTimeStamp: .invalid)
+        var size = 2, buffer: CMSampleBuffer?
+        XCTAssertEqual(CMSampleBufferCreate(
+            allocator: nil, dataBuffer: block, dataReady: true, makeDataReadyCallback: nil,
+            refcon: nil, formatDescription: format, sampleCount: samples,
+            sampleTimingEntryCount: 1, sampleTimingArray: &timing, sampleSizeEntryCount: 1,
+            sampleSizeArray: &size, sampleBufferOut: &buffer), noErr)
+        return try XCTUnwrap(buffer)
+    }
+
     /// A grey 320x240 clip at 30 fps in the temp directory, generated rather than committed.
-    private func makeClip(frames: Int) async throws -> URL {
+    private func makeClip(frames: Int, audio: Bool = false) async throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("tpd-source-\(UUID().uuidString).mp4")
         let writer = try AVAssetWriter(url: url, fileType: .mp4)
@@ -167,6 +228,16 @@ final class OverlayRendererTests: XCTestCase {
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: video,
                                                            sourcePixelBufferAttributes: bgra)
         writer.add(video)
+        var sound: AVAssetWriterInput?
+        if audio {
+            let input = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+                AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 44_100,
+                AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 64_000])
+            input.expectsMediaDataInRealTime = false
+            XCTAssertTrue(writer.canAdd(input))  // `add` raises rather than returning on a refusal
+            writer.add(input)
+            sound = input
+        }
         XCTAssertTrue(writer.startWriting(), "\(String(describing: writer.error))")
         writer.startSession(atSourceTime: .zero)
         for index in 0..<frames {
@@ -183,6 +254,11 @@ final class OverlayRendererTests: XCTestCase {
                 CMTime(value: CMTimeValue(index), timescale: 30)))
         }
         video.markAsFinished()
+        if let sound {
+            while !sound.isReadyForMoreMediaData { try await Task.sleep(nanoseconds: 2_000_000) }
+            XCTAssertTrue(sound.append(try silence(seconds: Double(frames) / 30)))
+            sound.markAsFinished()
+        }
         await writer.finishWriting()
         XCTAssertEqual(writer.status, .completed, "\(String(describing: writer.error))")
         return url

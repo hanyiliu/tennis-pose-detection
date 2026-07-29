@@ -3,70 +3,58 @@
 
 import SwiftUI
 
-/// Stroke/dot/pill drawing for one `TPDResult`. It re-derives no geometry: the
-/// keypoints already arrive in full-frame pixels (`TPDInferenceEngine` walks them
-/// back out through `LetterboxMath.letterboxToFrame`), so the only transform left
-/// is `FrameFit`, shared with `FramePreview`.
+/// The live rasterizer, and *only* a rasterizer: it derives no geometry of its own. Every
+/// position — the mapped box, the visible keypoints, the caption and where its pill sits — comes
+/// out of `OverlayGeometry`, the same value `OverlayRenderer` burns into exported frames. Before
+/// that the two paths computed the same arithmetic twice, which agreed only by transcription; a
+/// divergence would have shown up as a screenshot that did not match the exported video, which is
+/// nobody's first suspicion. `OverlayParityTests` renders one result through both and compares.
 struct OverlayCanvas: View {
     let result: TPDResult?
     let options: OverlayOptions
-
-    private let dotRadius: CGFloat = 4
+    /// Live view points, the units the overlay's constants were chosen in; the exporter passes
+    /// `.fitting(width:)` instead, because 2.5 pt of stroke is a hairline across 1080 px.
+    var style = OverlayStyle()
 
     var body: some View {
         Canvas { context, size in
-            guard let result, result.frameSize.width > 0, result.frameSize.height > 0 else { return }
-            let fit = FrameFit(frame: result.frameSize, view: size)
-            let box = fit.map(result.bbox)
-
-            if options.boundingBox {
-                context.stroke(Path(roundedRect: box, cornerRadius: 4),
-                               with: .color(.yellow), lineWidth: 2.5)
-            }
-            if options.keypoints {
-                // `drawableKeypoints` is the backend's `visibility <= 0` skip; a
-                // channel the heatmap never fired on must not be drawn at (0, 0).
-                for keypoint in result.drawableKeypoints {
-                    let centre = fit.map(keypoint.position)
-                    let dot = CGRect(x: centre.x - dotRadius, y: centre.y - dotRadius,
-                                     width: dotRadius * 2, height: dotRadius * 2)
-                    context.fill(Path(ellipseIn: dot), with: .color(.cyan))
-                    context.stroke(Path(ellipseIn: dot),
-                                   with: .color(.black.opacity(0.6)), lineWidth: 1)
-                }
-            }
-            if let caption = caption(for: result) {
-                draw(caption, in: &context, above: box, bounds: size)
-            }
+            guard let result else { return }
+            OverlayCanvas.draw(OverlayGeometry(result: result, options: options,
+                                               size: size, style: style),
+                               in: &context, style: style)
         }
         // Purely decorative: taps belong to the controls underneath it.
         .allowsHitTesting(false)
     }
 
-    /// Two independent toggles, one pill — so turning the class off leaves a bare
-    /// percentage rather than an empty badge.
-    private func caption(for result: TPDResult) -> String? {
-        var parts: [String] = []
-        if options.label { parts.append(result.label) }
-        if options.confidence { parts.append(String(format: "%.0f%%", result.confidence * 100)) }
-        return parts.isEmpty ? nil : parts.joined(separator: "   ")
-    }
-
-    /// Sits on the box's top edge, and flips below it when the box is against the
-    /// top of the screen, so the reading never leaves the view.
-    private func draw(_ caption: String, in context: inout GraphicsContext,
-                      above box: CGRect, bounds: CGSize) {
-        // The fill is explicit: `resolve` bakes in the *environment's* colour,
-        // which is white here, and white on the yellow pill is unreadable.
-        let text = context.resolve(Text(caption).font(.system(size: 15, weight: .semibold))
-            .foregroundColor(.black))
-        let measured = text.measure(in: bounds)
-        let pill = CGSize(width: measured.width + 20, height: measured.height + 10)
-        let x = min(max(6, box.minX), max(6, bounds.width - pill.width - 6))
-        var y = box.minY - pill.height - 6
-        if y < 6 { y = min(box.minY + 6, max(6, bounds.height - pill.height - 6)) }
-        let rect = CGRect(origin: CGPoint(x: x, y: y), size: pill)
-        context.fill(Path(roundedRect: rect, cornerRadius: pill.height / 2), with: .color(.yellow))
-        context.draw(text, at: CGPoint(x: rect.midX, y: rect.midY), anchor: .center)
+    /// The SwiftUI twin of `OverlayRenderer.draw(_:in:style:)` — same geometry, same palette, and
+    /// nothing left but the drawing calls, which are the one thing a `Canvas` and a `CGContext`
+    /// genuinely cannot share. The colours are read off `OverlayRenderer` rather than named
+    /// (`.yellow`, `.cyan`) so the two files cannot be repainted apart either.
+    static func draw(_ geometry: OverlayGeometry, in context: inout GraphicsContext,
+                     style: OverlayStyle) {
+        if let box = geometry.box {
+            context.stroke(Path(roundedRect: box, cornerRadius: style.boxCornerRadius),
+                           with: .color(Color(cgColor: OverlayRenderer.boxColor)),
+                           lineWidth: style.lineWidth)
+        }
+        for dot in geometry.dots {
+            let rect = CGRect(x: dot.center.x - dot.radius, y: dot.center.y - dot.radius,
+                              width: dot.radius * 2, height: dot.radius * 2)
+            context.fill(Path(ellipseIn: rect),
+                         with: .color(Color(cgColor: OverlayRenderer.dotColor)))
+            context.stroke(Path(ellipseIn: rect),
+                           with: .color(Color(cgColor: OverlayRenderer.dotOutlineColor)),
+                           lineWidth: max(style.lineWidth / 2.5, 1))
+        }
+        guard let pill = geometry.pill else { return }
+        context.fill(Path(roundedRect: pill.rect, cornerRadius: pill.rect.height / 2),
+                     with: .color(Color(cgColor: OverlayRenderer.boxColor)))
+        // The fill is explicit: `resolve` bakes in the *environment's* colour, which is white
+        // here, and white on the yellow pill is unreadable.
+        let text = context.resolve(Text(pill.text)
+            .font(.system(size: pill.fontSize, weight: .semibold))
+            .foregroundColor(Color(cgColor: OverlayRenderer.captionColor)))
+        context.draw(text, at: CGPoint(x: pill.rect.midX, y: pill.rect.midY), anchor: .center)
     }
 }
