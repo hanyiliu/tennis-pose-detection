@@ -19,8 +19,7 @@ struct PhotoPreviewView: View {
     /// Fresh per presentation, which is what makes `.task` a once-per-pick load
     /// and what lets the models be released when the screen goes away.
     @State private var model = PreviewViewModel()
-    /// Owned here rather than inside `VideoPreview` because the scrub bar sits
-    /// *above* the toggle strip, and a bar in the picture layer would sit under.
+    /// Owned here, not in `VideoPreview`: the bar sits *above* the toggle strip.
     @State private var video = VideoPreviewModel()
 
     var body: some View {
@@ -30,7 +29,10 @@ struct PhotoPreviewView: View {
             VStack(spacing: 0) {
                 topBar
                 Spacer(minLength: 0)
-                if case .video = model.stage { scrubBar }
+                if case .video = model.stage {
+                    ScrubBar(model: video).padding(.horizontal, 16).padding(.vertical, 8)
+                        .background(.black.opacity(0.55))
+                }
                 // The toggles are meaningless over a spinner or an error, so the
                 // strip appears with the picture it controls.
                 switch model.stage {
@@ -78,12 +80,6 @@ struct PhotoPreviewView: View {
         }
         .padding(.horizontal, 14)
         .padding(.top, 8)
-    }
-
-    private var scrubBar: some View {
-        ScrubBar(model: video)
-            .padding(.horizontal, 16).padding(.vertical, 8)
-            .background(.black.opacity(0.55))
     }
 
     private var controls: some View {

@@ -1,48 +1,60 @@
 //  VideoPreview.swift
-//  An AVPlayer whose frames we pull ourselves, the overlay stack the live view
-//  uses, and a badge saying whether the two describe the same frame.
+//  An AVPlayer we pull frames from, the live view's overlay stack, and a badge.
 
 import AVFoundation
 import CoreImage
 import QuartzCore
 import SwiftUI
 
-/// Playback, exact seeking and opportunistic analysis. `NSObject` only because
-/// `CADisplayLink` needs an `@objc` target; no engine of its own, so every pick
-/// reuses the models `StillInferenceWorker.shared` already loaded.
+/// Rasterization, off main and *not* on the engine's parity `CIContext`: one
+/// 608x1080 `createCGImage` measures **400–1375 ms** here, and in the tick it held
+/// main 400 of every 430 ms — SwiftUI never redrew, so the transport looked dead.
+actor FrameRasterizer {
+    private var context: CIContext?
+    func image(from frame: VideoFrame) -> CGImage? {
+        let context = context ?? CIContext(); self.context = context
+        let image = CIImage(cvPixelBuffer: frame.pixelBuffer)
+        return context.createCGImage(image, from: image.extent)
+    }
+}
+
+/// Playback, exact seeking and opportunistic analysis; `NSObject` for `@objc`.
 @MainActor
 @Observable
 final class VideoPreviewModel: NSObject {
-    /// `.stale` carries the time the overlay *does* describe. A wrong-but-pretty
-    /// overlay pinned silently over a moving picture is worse than none.
+    /// `.stale` carries the time the overlay *does* describe — silently pinning a
+    /// wrong one over a moving picture is worse than showing none.
     enum Overlay: Equatable { case none, current, stale(Double) }
+    /// A result and the frame time it came from, one value for the reason
+    /// `RenderedFrame` is: apart they drift, and the badge names a stranger.
+    struct Held: Equatable { let result: TPDResult, time: Double }
 
     private(set) var image: CGImage?
-    private(set) var result: TPDResult?
-    private(set) var overlay: Overlay = .none
+    private(set) var held: Held?
+    private(set) var overlay = Overlay.none
     private(set) var isPlaying = false
     private(set) var time: Double = 0
     private(set) var duration: Double = 0
     private(set) var failure: String?
-
+    var result: TPDResult? { held?.result }   // never set without its timestamp
     @ObservationIgnored private var player: AVPlayer?
     @ObservationIgnored private var output: AVPlayerItemVideoOutput?
     @ObservationIgnored private var link: CADisplayLink?
-    /// Built on first use: `@State` constructs this model on main.
-    @ObservationIgnored private var display: CIContext?
     @ObservationIgnored private var cache: ResultCache?
-    /// The buffer on screen and when it appeared; `sync()` re-targets from it.
-    @ObservationIgnored private var shown: VideoFrame?
+    @ObservationIgnored private let raster = FrameRasterizer()
+    @ObservationIgnored private var shown: VideoFrame?   // on screen; sync() re-targets
     @ObservationIgnored private var shownSince: CFTimeInterval = 0
     @ObservationIgnored private var analysis: Task<Void, Never>?
-    @ObservationIgnored private var resultTime: Double?
     @ObservationIgnored private var source: URL?
-    /// `scrubbing` keeps the bar following the finger; `stopped` keeps a cancelled
-    /// pass from re-arming `sync()` after teardown.
+    /// `resuming` is a restart waiting for its rewind; `stopped` keeps a cancelled
+    /// pass, or a load parked on an await, from re-arming anything after teardown.
     @ObservationIgnored private var scrubbing = false
+    @ObservationIgnored private var resuming = false
     @ObservationIgnored private var stopped = false
-
+    @ObservationIgnored private var rastering = false
     /// Idempotent — the view's `.task` may re-run without the screen going away.
+    /// All four awaits can be dismissed across, and a player and display link
+    /// installed after that `stop()` leak: the run loop retains the link.
     func start(url: URL) async {
         guard player == nil, !stopped else { return }
         source = url
@@ -51,23 +63,23 @@ final class VideoPreviewModel: NSObject {
             guard let track = try await asset.loadTracks(withMediaType: .video).first else {
                 throw FrameSourceError.videoDecodeUnavailable("clip contains no video track")
             }
+            guard !stopped else { return }
             // As in `VideoFileFrameSource`: a bare output hands back the *encoded*
-            // buffer and ignores `preferredTransform`, so a portrait clip would
-            // arrive sideways and take every overlay coordinate with it.
+            // buffer, so a portrait clip arrives sideways, overlays and all.
             let composition = try await AVVideoComposition.videoComposition(withPropertiesOf: asset)
+            guard !stopped else { return }
             duration = max(try await asset.load(.duration).seconds, 0)
+            guard !stopped else { return }
             cache = ResultCache(frameRate: Double(try await track.load(.nominalFrameRate)))
-            let item = AVPlayerItem(asset: asset)
-            item.videoComposition = composition
+            guard !stopped else { return }
+            let item = AVPlayerItem(asset: asset); item.videoComposition = composition
             let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
-            ])
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
             item.add(output); self.output = output
-            let player = AVPlayer(playerItem: item)
+            let player = AVPlayer(playerItem: item); self.player = player
             player.isMuted = true; player.actionAtItemEnd = .pause
-            self.player = player
-            // Deliberately **not** `play()`: one pass costs ~9.7 s here, so an
-            // auto-playing clip ends before a single overlay exists.
+            // Deliberately **not** `play()`: a pass costs ~9.7 s, so an
+            // auto-playing clip would end before one overlay existed.
             link = CADisplayLink(target: self, selector: #selector(tick))
             link?.add(to: .main, forMode: .common)
         } catch {
@@ -75,96 +87,103 @@ final class VideoPreviewModel: NSObject {
         }
     }
 
-    /// Cancelling `analysis` is the cooperative half: `analyse` re-checks at its
-    /// stage boundaries, so a pass that has not reached `predict` stops there.
+    /// `analyse` re-checks at its boundaries; the temp copy is ours to bin.
     func stop() {
         stopped = true
         analysis?.cancel(); analysis = nil
         link?.invalidate(); link = nil
-        player?.pause(); shown = nil
-        // The picker handed us a copy in the temp directory; it is ours to bin.
+        player?.pause(); shown = nil; resuming = false
         if let source { try? FileManager.default.removeItem(at: source) }
     }
 
+    /// Playback is an *intent*: at the very end `play()` does nothing, so a restart
+    /// rewinds and `tick` starts it once the playhead moves — a `play()` beside the
+    /// rewind, or from its completion, races it and can be lost.
     func togglePlay() {
-        guard let player else { return }
-        // Parked at the very end, `play()` is a no-op until a seek back actually
-        // lands — a dead-looking button — so the resume rides the seek's
-        // completion. `isPlaying` is published by `tick`, every vsync.
-        if player.rate > 0 { player.pause() } else if duration > 0, time >= duration - 0.05 {
-            seek(to: 0, resuming: true)
+        guard let player, !stopped else { return }
+        if player.rate > 0 || resuming {
+            resuming = false; player.pause()
+        } else if duration > 0, time >= duration - 0.05 {
+            // `pause()` is not redundant at rate 0: it clears the played-to-end
+            // disposition, without which the rewind is sometimes dropped.
+            resuming = true; player.pause(); seek(to: 0)
         } else {
             player.play()
         }
     }
 
-    /// Every drag update seeks **exactly**, which the cache needs as much as the
-    /// spec does: a tolerant seek lands on the nearest sync sample, so one bar
-    /// position would key different frames from drag to drag. Overlapping seeks
-    /// need no queue of ours — `AVPlayer` drops the one in flight for the newest.
+    /// Every drag seeks **exactly**: a tolerant seek lands on the nearest sync
+    /// sample, so one bar position would key different frames from drag to drag and
+    /// the cache would stop hitting. A drag also calls off a pending restart.
     func scrub(to fraction: Double, hasEnded: Bool) {
         guard duration > 0 else { return }
-        if !scrubbing { player?.pause() }
+        if !scrubbing { resuming = false; player?.pause() }
         scrubbing = !hasEnded
         time = min(max(fraction, 0), 1) * duration
         seek(to: time)
     }
 
-    private func seek(to seconds: Double, resuming: Bool = false) {
+    private func seek(to seconds: Double) {
         player?.seek(to: CMTime(seconds: seconds, preferredTimescale: 600),
-                     toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
-            if resuming { Task { @MainActor in self?.player?.play() } }
-        }
+                     toleranceBefore: .zero, toleranceAfter: .zero)
     }
-
     @objc private func tick() {
         guard let output, let player else { return }
-        // Paused, the timebase is not advancing, and "the time this vsync will
-        // show" lags a completed seek by a beat; `currentTime()` is right there.
+        // Paused, "the time this vsync shows" lags a seek; `currentTime()` does not.
         var itemTime = output.itemTime(forHostTime: CACurrentMediaTime())
         if player.rate == 0 { itemTime = player.currentTime() }
-        if (player.rate > 0) != isPlaying { isPlaying = player.rate > 0 }
-        guard output.hasNewPixelBuffer(forItemTime: itemTime),
+        // The restart's second half: the rewind has landed once the playhead is
+        // off the end, and only then can `play()` take. Re-asserted until the
+        // player's rate agrees, so no dropped resume strands the button.
+        if resuming, player.currentTime().seconds < duration - 0.05 {
+            player.play()
+            resuming = player.rate == 0
+        }
+        let playing = player.rate > 0 || resuming
+        if playing != isPlaying { isPlaying = playing }
+        // One raster at a time, newest frame wins — the live view's drop gate —
+        // and picture, playhead and overlay publish together when it lands, so the
+        // badge still describes the frame on screen.
+        guard !rastering, output.hasNewPixelBuffer(forItemTime: itemTime),
               let buffer = output.copyPixelBuffer(forItemTime: itemTime,
                                                   itemTimeForDisplay: nil) else { return }
-        shown = VideoFrame(pixelBuffer: buffer, time: itemTime)
-        shownSince = CACurrentMediaTime()
-        let context = display ?? CIContext(); display = context
-        let ciImage = CIImage(cvPixelBuffer: buffer)
-        image = context.createCGImage(ciImage, from: ciImage.extent)
-        if !scrubbing { time = itemTime.seconds }
-        sync()
+        let frame = VideoFrame(pixelBuffer: buffer, time: itemTime); rastering = true
+        Task { [weak self, raster] in
+            let drawn = await raster.image(from: frame)
+            guard let self else { return }
+            rastering = false
+            guard let drawn, !stopped else { return }
+            image = drawn; shown = frame; shownSince = CACurrentMediaTime()
+            if !scrubbing { time = frame.time.seconds }
+            sync()
+        }
     }
-
-    /// One place decides both what the overlay shows and what is analysed next. A
-    /// cached result for the frame on screen is `.current`; anything else keeps the
-    /// last finished result, flags it `.stale` with its own timestamp, and starts a
-    /// pass — one at a time, so playback and scrubbing never wait on inference.
-    /// Re-entered when a pass lands: the frame on screen has usually moved on, and
-    /// paused on one frame there may never be another tick carrying a new buffer.
+    /// What the badge may claim: a cached result for the frame on screen *is* that
+    /// frame's and reads `.current`; anything else keeps the last pair and names its
+    /// frame. Pure, so miss -> hit -> miss is a test rather than a scrub and a hope.
+    static func resolve(frameAt seconds: Double, cached: TPDResult?,
+                        held: Held?) -> (held: Held?, overlay: Overlay) {
+        if let cached { return (Held(result: cached, time: seconds), .current) }
+        return (held, held.map { Overlay.stale($0.time) } ?? .none)
+    }
+    /// One place decides the overlay and the next pass, one at a time; re-entered
+    /// when a pass lands, because the frame on screen has usually moved on.
     private func sync() {
         guard let cache, let frame = shown else { return }
-        let index = cache.index(for: frame.time.seconds)
-        if let hit = cache.value(at: index) {
-            // The number the cache exists for: picture on screen -> overlay right.
-            if overlay != .current {
-                NSLog("TPD video: frame at %.2f s got its overlay %.0f ms after appearing",
-                      frame.time.seconds, (CACurrentMediaTime() - shownSince) * 1000)
-            }
-            result = hit
-            overlay = .current
-            return
+        let seconds = frame.time.seconds, index = cache.index(for: seconds)
+        let hit = cache.value(at: index)
+        if hit != nil, overlay != .current {   // the number the cache exists for
+            NSLog("TPD video: frame at %.2f s got its overlay %.0f ms after appearing",
+                  seconds, (CACurrentMediaTime() - shownSince) * 1000)
         }
-        overlay = resultTime.map(Overlay.stale) ?? .none
-        guard !stopped, analysis == nil else { return }
-        let seconds = frame.time.seconds
+        (held, overlay) = Self.resolve(frameAt: seconds, cached: hit, held: held)
+        guard hit == nil, !stopped, analysis == nil else { return }
         analysis = Task { [weak self] in
             let fresh = try? await cache.result(at: index) {
-                try await StillInferenceWorker.shared.analyse(frame)
-            }
+                try await StillInferenceWorker.shared.analyse(frame) }
             guard let self else { return }
             analysis = nil
-            if let fresh { result = fresh; resultTime = seconds }
+            if let fresh { held = Held(result: fresh, time: seconds) }
             sync()
         }
     }
@@ -172,17 +191,13 @@ final class VideoPreviewModel: NSObject {
 
 /// The picture and its overlay; chrome belongs to `PhotoPreviewView`.
 struct VideoPreview: View {
-    let model: VideoPreviewModel
-    let url: URL
-    let options: OverlayOptions
+    let model: VideoPreviewModel, url: URL, options: OverlayOptions
 
     var body: some View {
         ZStack {
             FramePreview(image: model.image)
-            OverlayCanvas(result: model.result, options: options)
-                // Unmistakable, and it degrades gracefully: a stale overlay is
-                // still roughly informative, it stops looking authoritative.
-                .opacity(model.overlay == .current ? 1 : 0.3)
+            OverlayCanvas(result: model.result, options: options)   // stale: still
+                .opacity(model.overlay == .current ? 1 : 0.3)          // informative
             VStack(spacing: 0) { badge.padding(.top, 54); Spacer(minLength: 0) }
         }
         .task { await model.start(url: url) }
@@ -194,13 +209,11 @@ struct VideoPreview: View {
         var text = "\(here)  analysing this frame…", tint = Color.yellow
         if case .current = model.overlay { text = "\(here)  overlay matches"; tint = .green }
         if case .stale(let at) = model.overlay {
-            text = String(format: "%@  overlay is from %.2f s — analysing", here, at)
-            tint = .orange
+            text = String(format: "%@  overlay is from %.2f s — analysing", here, at); tint = .orange
         }
         if let failure = model.failure { text = failure; tint = .red }
         return Text(text)
-            .font(.system(size: 11, weight: .medium).monospacedDigit())
-            .foregroundStyle(tint)
+            .font(.system(size: 11, weight: .medium).monospacedDigit()).foregroundStyle(tint)
             .padding(.horizontal, 11).padding(.vertical, 6)
             .background(.black.opacity(0.65), in: Capsule())
     }

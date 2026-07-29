@@ -95,11 +95,9 @@ actor StillInferenceWorker {
     }
 
     /// The video path's way in, here rather than in a new actor so a clip analysed
-    /// after a photo — or after three other clips — reuses models already resident
-    /// instead of loading a pair per presentation. It returns only the result: the
-    /// preview rasterizes its own frames on main, because a 30 fps picture must not
-    /// queue behind a ten-second inference. The second check is the last boundary
-    /// there is — `predict` is one call, so a pass past it runs to the end.
+    /// after a photo reuses models already resident. It returns only the result;
+    /// `FrameRasterizer` draws the picture. The second check is the last boundary
+    /// there is — `predict` is one call and runs to the end.
     func analyse(_ frame: VideoFrame) throws -> TPDResult {
         try Task.checkCancellation()
         let engine = try engine ?? makeEngine()
@@ -167,8 +165,7 @@ final class PreviewViewModel {
     }
 
     /// A movie is loaded as a **file**, not as `Data`: `AVURLAsset` needs a URL to
-    /// seek in, and pulling a 30 s 4K recording into memory to write it back out
-    /// would cost hundreds of megabytes for nothing.
+    /// seek in, and a 30 s 4K recording through memory would cost hundreds of MB.
     private func loadVideo(_ item: PhotosPickerItem) async {
         do {
             guard let movie = try await item.loadTransferable(type: PickedMovie.self) else {
@@ -176,9 +173,7 @@ final class PreviewViewModel {
             }
             try Task.checkCancellation()
             stage = .video(movie.url)
-        } catch is CancellationError {
-            return
-        } catch {
+        } catch is CancellationError { return } catch {
             stage = .failed(Self.message(for: error))
         }
     }
@@ -215,9 +210,9 @@ struct PickedMovie: Transferable {
 
     static var transferRepresentation: some TransferRepresentation {
         FileRepresentation(importedContentType: .movie) { received in
-            let suffix = received.file.pathExtension
+            let suffix = received.file.pathExtension.isEmpty ? "mov" : received.file.pathExtension
             let copy = FileManager.default.temporaryDirectory
-                .appendingPathComponent("tpd-\(UUID().uuidString).\(suffix.isEmpty ? "mov" : suffix)")
+                .appendingPathComponent("tpd-\(UUID().uuidString).\(suffix)")
             try FileManager.default.copyItem(at: received.file, to: copy)
             return PickedMovie(url: copy)
         }
