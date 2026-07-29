@@ -53,9 +53,9 @@ enum TPDResample {
         let filterScale = max(scale, 1)
         let support = filter.support * filterScale
         let stride = Int(support.rounded(.up)) * 2 + 1
-        // The C multiplies by a precomputed `1.0 / filterscale`; dividing instead differs in
-        // the last bit of the filter argument, which a tap sitting on a rounding boundary
-        // would carry into the fixed-point weight.
+        // The C multiplies by a precomputed `1.0 / filterscale` rather than dividing per
+        // tap. Kept in that form to match; no sweep here has shown a size where dividing
+        // instead changes a byte, so treat it as fidelity to the source, not a fix.
         let inverse = 1 / filterScale
         var k = [Int32](repeating: 0, count: outSize * stride)
         var first = [Int](repeating: 0, count: outSize), count = first
@@ -142,8 +142,10 @@ enum TPDResample {
             for x in 0..<outWidth {
                 let x0 = box.x0 + x * xScale, x1 = min(x0 + xScale, box.x1)
                 let n = (x1 - x0) * (y1 - y0)
-                // `division_UINT32(n, 8)`: the C divides in **float**, not double, then
-                // truncates — reproduce both or the last bit drifts on some factors.
+                // Mirrors `division_UINT32(n, 8)`. The C computes this in float; a brute
+                // force over n in 1..200000 found float and double give the same truncated
+                // multiplier for every n, so the narrowing is kept only to match the C
+                // literally, not because any measurement requires it.
                 let multiplier = UInt32(Float(1 << 30) * 4 / Float(256 * n))
                 var acc = SIMD4<UInt32>(repeating: UInt32(n / 2))
                 for yy in y0..<y1 {

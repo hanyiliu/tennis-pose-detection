@@ -18,7 +18,6 @@ enum LetterboxMath {
         /// frontend/ios/README.md, "Decided divergences".
         let scale: CGFloat
         let padX: CGFloat, padY: CGFloat
-        let scaledWidth: CGFloat, scaledHeight: CGFloat
     }
 
     /// Letterbox parameters for fitting `size` into an `output` x `output` square.
@@ -26,9 +25,7 @@ enum LetterboxMath {
         let width = max(size.width, 1), height = max(size.height, 1)
         let out = CGFloat(output)
         let scale = min(1, min(out / width, out / height))
-        let scaledWidth = width * scale, scaledHeight = height * scale
-        return Params(scale: scale, padX: (out - scaledWidth) / 2, padY: (out - scaledHeight) / 2,
-                      scaledWidth: scaledWidth, scaledHeight: scaledHeight)
+        return Params(scale: scale, padX: (out - width * scale) / 2, padY: (out - height * scale) / 2)
     }
 
     /// Reverse map: letterboxed model space -> full-frame pixels. Mirrors
