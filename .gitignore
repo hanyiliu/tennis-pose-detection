@@ -25,3 +25,10 @@ DerivedData/
 .swiftpm
 frontend/ios/build/
 frontend/ios/TPD/Info.plist
+
+# Sample clip the Simulator frame source plays. Not committed: this repo has no
+# LFS, and a video binary in history is not removable. Supply it locally at
+# frontend/ios/TPD/Media/sample_rally.mp4 — the app shows a retryable empty
+# state when it is absent.
+frontend/ios/TPD/Media/*.mp4
+frontend/ios/build/
