@@ -1,8 +1,9 @@
 //  PreviewViewModel.swift
-//  One pick -> one inference -> one frame on screen. The still path; video is
-//  PR9/PR10 and stops at a placeholder here.
+//  One pick -> one frame on screen. Stills run their single inference here;
+//  movies are copied to a file and handed to `VideoPreviewModel`.
 
 import CoreImage
+import CoreTransferable
 import Foundation
 import Observation
 // PhotosUI declares `PhotosPickerItem` against SwiftUI; without SwiftUI in scope
@@ -93,6 +94,18 @@ actor StillInferenceWorker {
         return RenderedFrame(image: raster, result: result)
     }
 
+    /// The video path's way in, here rather than in a new actor so a clip analysed
+    /// after a photo reuses models already resident. It returns only the result;
+    /// `FrameRasterizer` draws the picture. The second check is the last boundary
+    /// there is — `predict` is one call and runs to the end.
+    func analyse(_ frame: VideoFrame) throws -> TPDResult {
+        try Task.checkCancellation()
+        let engine = try engine ?? makeEngine()
+        self.engine = engine
+        try Task.checkCancellation()
+        return try engine.predict(pixelBuffer: frame.pixelBuffer)
+    }
+
     private func makeEngine() throws -> TPDInferenceEngine {
         let engine = try TPDInferenceEngine()
         modelLoadCount += 1
@@ -118,8 +131,9 @@ final class PreviewViewModel {
         /// The picture and the result measured from it, published together so an
         /// overlay can never be drawn over a frame it does not describe.
         case still(RenderedFrame)
-        /// A movie was picked. Deliberately inert in this PR — see the view.
-        case video
+        /// A movie, copied out of the library; playback, scrubbing and per-frame
+        /// analysis are `VideoPreviewModel`'s from here.
+        case video(URL)
         case failed(String)
     }
 
@@ -146,7 +160,21 @@ final class PreviewViewModel {
     func load(_ media: PickedMedia) async {
         switch media.kind {
         case .image: await loadStill(media.item)
-        case .video: stage = .video
+        case .video: await loadVideo(media.item)
+        }
+    }
+
+    /// A movie is loaded as a **file**, not as `Data`: `AVURLAsset` needs a URL to
+    /// seek in, and a 30 s 4K recording through memory would cost hundreds of MB.
+    private func loadVideo(_ item: PhotosPickerItem) async {
+        do {
+            guard let movie = try await item.loadTransferable(type: PickedMovie.self) else {
+                throw MediaPickerError.transferFailed
+            }
+            try Task.checkCancellation()
+            stage = .video(movie.url)
+        } catch is CancellationError { return } catch {
+            stage = .failed(Self.message(for: error))
         }
     }
 
@@ -171,5 +199,22 @@ final class PreviewViewModel {
     /// so they are passed through rather than rewritten.
     private static func message(for error: Error) -> String {
         (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+    }
+}
+
+/// A picked movie, on disk. The URL the picker hands the importer is valid only
+/// for that call, so the copy is mandatory rather than cautious;
+/// `VideoPreviewModel.stop()` deletes it again.
+struct PickedMovie: Transferable {
+    let url: URL
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(importedContentType: .movie) { received in
+            let suffix = received.file.pathExtension.isEmpty ? "mov" : received.file.pathExtension
+            let copy = FileManager.default.temporaryDirectory
+                .appendingPathComponent("tpd-\(UUID().uuidString).\(suffix)")
+            try FileManager.default.copyItem(at: received.file, to: copy)
+            return PickedMovie(url: copy)
+        }
     }
 }
