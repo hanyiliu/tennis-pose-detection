@@ -6,6 +6,7 @@
 
 import AVFoundation
 import CoreGraphics
+import CoreImage
 import Foundation
 
 /// Serializes the non-`Sendable` engine so one instance can cross into an export off the caller's
@@ -18,6 +19,15 @@ final class SerializedInferenceEngine: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return try engine.predict(pixelBuffer: frame.pixelBuffer)
+    }
+    /// The still path's shape, here so `StillInferenceWorker` can route **every** call through
+    /// this one wrapper. Actor isolation alone would not cover an export: it holds this object
+    /// and never touches that actor again, so without a shared lock a preview pass and an
+    /// export could be inside the same engine at once.
+    func predict(image: CIImage) throws -> TPDResult {
+        lock.lock()
+        defer { lock.unlock() }
+        return try engine.predict(frame: image)
     }
 }
 

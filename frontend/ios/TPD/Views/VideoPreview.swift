@@ -51,9 +51,15 @@ final class VideoPreviewModel: NSObject {
     @ObservationIgnored private var resuming = false
     @ObservationIgnored private var stopped = false
     @ObservationIgnored private var rastering = false
-    /// Idempotent — the view's `.task` may re-run without the screen going away. All
-    /// four awaits can be dismissed across; anything installed after `stop()` leaks,
-    /// because the run loop retains the display link.
+
+    /// What this presentation already paid ~9.7 s a frame for, so an export re-infers
+    /// only the frames nobody looked at.
+    var analysed: ResultSnapshot {
+        ResultSnapshot(frameRate: cache?.frameRate ?? 30, entries: cache?.snapshot ?? [:])
+    }
+
+    /// Idempotent — the `.task` may re-run without the screen going away. All four awaits
+    /// can be dismissed across; anything installed after `stop()` leaks the display link.
     func start(url: URL) async {
         guard player == nil, !stopped else { return }
         source = url
