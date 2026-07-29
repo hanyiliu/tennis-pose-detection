@@ -36,7 +36,10 @@ actor StillInferenceWorker {
     /// already paid for that lesson; this is the same trap on a new path, and
     /// `shared` does not defuse it: a lazy global runs its initializer in
     /// whatever domain touched it first, which here is the main actor.
-    private var engine: TPDInferenceEngine?
+    /// Wrapped rather than held bare so `lend()` can hand the *same* instance to an export
+    /// running off this actor: two mutual-exclusion mechanisms over one non-`Sendable` engine
+    /// is no mechanism at all, so every path — this actor's two included — takes that lock.
+    private var engine: SerializedInferenceEngine?
     /// Display rasterization only. Pointedly *not* the engine's context, whose
     /// colour management is switched off for numeric parity with the Python
     /// pipeline; those settings are for matching floats, not for looking right.
@@ -76,7 +79,7 @@ actor StillInferenceWorker {
         // is expressed in this one upright space.
         let image = try PickedImage.upright(from: data)
         try Task.checkCancellation()
-        let result = try engine.predict(frame: image)
+        let result = try engine.predict(image: image)
         try Task.checkCancellation()
         guard let raster = display.createCGImage(image, from: image.extent) else {
             throw MediaPickerError.undecodableImage
@@ -103,11 +106,20 @@ actor StillInferenceWorker {
         let engine = try engine ?? makeEngine()
         self.engine = engine
         try Task.checkCancellation()
-        return try engine.predict(pixelBuffer: frame.pixelBuffer)
+        return try engine.predict(frame)
     }
 
-    private func makeEngine() throws -> TPDInferenceEngine {
-        let engine = try TPDInferenceEngine()
+    /// Lends the export the models this app has already loaded. A second `TPDInferenceEngine`
+    /// built for an export would be the per-presentation stacking bug in a different hat: two
+    /// copies of both models resident for the minutes a burn-in takes.
+    func lend() throws -> SerializedInferenceEngine {
+        let engine = try engine ?? makeEngine()
+        self.engine = engine
+        return engine
+    }
+
+    private func makeEngine() throws -> SerializedInferenceEngine {
+        let engine = SerializedInferenceEngine(try TPDInferenceEngine())
         modelLoadCount += 1
         // Cheap standing proof, the same one the live view keeps: if this load
         // ever migrates back into an initializer this prints YES.

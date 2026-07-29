@@ -22,11 +22,18 @@ final class ResultCache {
     /// Frame *k* is on screen for `[k/fps, (k+1)/fps)`, so flooring — not rounding
     /// — maps a time to the frame a viewer sees. Non-finite and negative collapse
     /// to 0: `CMTime.seconds` is NaN before the item is ready and `Int(nan)` traps.
-    func index(for seconds: Double) -> Int {
+    func index(for seconds: Double) -> Int { Self.index(for: seconds, frameRate: frameRate) }
+
+    /// The same arithmetic, reachable off this actor: `VideoExporter`'s analyze closure is
+    /// neither async nor isolated, so an export reusing these entries keys them from its own
+    /// task — and keying them one hair differently would miss every entry without looking wrong.
+    nonisolated static func index(for seconds: Double, frameRate: Double) -> Int {
         guard seconds.isFinite, seconds > 0 else { return 0 }
-        return Int((seconds * frameRate).rounded(.down))
+        return Int((seconds * (frameRate > 0 ? frameRate : 30)).rounded(.down))
     }
     var count: Int { entries.count }
+    /// Everything analysed so far, as a value. See `ResultSnapshot`.
+    var snapshot: [Int: TPDResult] { entries }
     func value(at index: Int) -> TPDResult? {
         guard let hit = entries[index] else { return nil }
         touch(index)

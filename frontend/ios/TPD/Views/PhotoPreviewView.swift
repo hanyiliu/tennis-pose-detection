@@ -21,6 +21,9 @@ struct PhotoPreviewView: View {
     @State private var model = PreviewViewModel()
     /// Owned here, not in `VideoPreview`: the bar sits *above* the toggle strip.
     @State private var video = VideoPreviewModel()
+    /// One per presentation, and it holds the export task. Nil until Share is
+    /// tapped, so a preview nobody shares from costs nothing.
+    @State private var export: ExportViewModel?
 
     var body: some View {
         ZStack {
@@ -40,9 +43,13 @@ struct PhotoPreviewView: View {
                 case .loading, .failed: EmptyView()
                 }
             }
+            if let export { ExportProgressView(model: export) { self.export = nil } }
         }
         .preferredColorScheme(.dark)
         .task { await model.load(media) }
+        // Leaving mid-export must stop it: the run is minutes long and nothing it
+        // produces from here on can be seen.
+        .onDisappear { export?.stop() }
     }
 
     @ViewBuilder
@@ -61,9 +68,8 @@ struct PhotoPreviewView: View {
         }
     }
 
-    /// Top left, matching the spec. Nothing else lives up here yet — the share
-    /// button is PR10's, and a disabled one would only promise something this
-    /// build cannot do.
+    /// Top left, matching the spec. Nothing else lives up here: the share button
+    /// belongs to the bottom-left slot beside the toggles.
     private var topBar: some View {
         HStack {
             Button(action: onExit) {
@@ -84,12 +90,43 @@ struct PhotoPreviewView: View {
 
     private var controls: some View {
         HStack(alignment: .center, spacing: 10) {
+            shareButton
             Spacer(minLength: 0)
             ToggleBar(options: $model.overlay)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
         .background(.black.opacity(0.55))
+    }
+
+    /// Bottom-left, the slot the camera roll button occupies on the live view. Live
+    /// only over a movie — a still has no clip to burn an overlay into — and dimmed
+    /// rather than hidden, so the control does not vanish between two picks.
+    private var shareButton: some View {
+        let url: URL? = if case .video(let url) = model.stage { url } else { nil }
+        return Button {
+            guard let url else { return }
+            // The toggles are read at the tap, so what is burned in is what is on
+            // screen, and changing them mid-export cannot rewrite it.
+            let started = ExportViewModel()
+            started.start(source: url, overlay: model.overlay, snapshot: video.analysed)
+            export = started
+        } label: {
+            VStack(spacing: 3) {
+                Image(systemName: "square.and.arrow.up").font(.system(size: 15, weight: .semibold))
+                Text("Share").font(.system(size: 10, weight: .medium))
+            }
+            .frame(width: 54, height: 46)
+            .background(Color.white.opacity(0.16),
+                        in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .foregroundStyle(Color.white)
+            .opacity(url == nil ? 0.35 : 1)
+        }
+        .buttonStyle(.plain)
+        .disabled(url == nil)
+        .accessibilityLabel("Share")
+        .accessibilityHint(url == nil ? "Only videos can be exported"
+                                      : "Burns the overlay in and saves the video to your camera roll")
     }
 
     /// Spinner, placeholder and error are the same layout with different
