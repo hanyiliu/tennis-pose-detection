@@ -42,12 +42,35 @@ makes `_apply_visibility_mask` a pass-through — so neither affects exported nu
 
 ### 0.3 The three known divergences (decided, not open)
 
-1. **Letterbox upscale.** Python `letterbox_resize` uses `PIL.thumbnail`, which *never upscales*.
-   The reverse map in `image_outputs.py:95` and the training targets in
-   `tensor_preprocessing.py:120` both use the **unclamped** `scale`. Python is internally
-   inconsistent for crops smaller than 128px. → **Swift implements unclamped scale** (always fit
-   to 128). Matches training and the reverse map; only diverges from `inference.py` on sub-128
-   crops, which are degenerate anyway.
+1. **Letterbox upscale — Swift uses the CLAMPED scale.** *(Reversed in TPD-32. The earlier entry
+   here said unclamped "because it matches training"; that premise was false.)*
+   `letterbox_resize` is `PIL.thumbnail`, which *never upscales*. The claim that training used
+   the unclamped scale does not survive reading `train/keypoint_train.py`:
+
+   ```
+   keypoint_train.py:220   transforms.Lambda(lambda img: letterbox_resize(img, image_size))
+   keypoint_train.py:223   KeypointsToHeatmaps(out_size=target_heatmap_size, ...)
+   ```
+
+   The training **input** went through `letterbox_resize`, i.e. `PIL.thumbnail`, i.e. the
+   clamped, never-upscaling scale. Only the **target** heatmaps
+   (`tensor_preprocessing.py:120`) use the unclamped `min(out_w/bbox_w, out_h/bbox_h)`. So
+   training is self-inconsistent for sub-128 crops — the model saw a small image pasted on
+   black while its supervision assumed that image filled 128 px — and the checkpoint is
+   unreliable on that branch no matter what the client does. What is *not* ambiguous is the
+   input convention: `keypoint_train.py`, `inference/inference.py` and
+   `backend/api/services/model_service.py` all letterbox with `PIL.thumbnail`.
+   → **Swift clamps: `scale = min(1, min(128/w, 128/h))`**, in both `LetterboxMath` and
+   `TPDResample`. This makes the 128x128 stage-2 buffer byte-identical to the backend's on
+   sub-128 crops instead of merely close, and it is the only branch that ever changed the
+   predicted class: on 12 sub-128 crops through the real stage-2 + stage-3 checkpoint the
+   unclamped scale flipped 3 of 12 against Python (each at a 1.000 softmax margin); clamped
+   agrees 12/12.
+
+   `letterboxToFrame` (overlay drawing only) uses the same clamped scale, so it inverts the
+   forward transform exactly. `image_outputs.py::_letterbox_xy_to_bbox_xy` still divides by
+   the unclamped scale and mis-places keypoints on sub-128 crops; iOS deliberately does not
+   reproduce that bug, because the reverse map cannot affect the predicted class.
 2. **Double softmax.** `pose_classification.forward()` softmaxes, then `model_service.py:274`
    softmaxes again — flattening the web app's confidences. → **Swift softmaxes once**, matching
    `inference/inference.py`. Argmax is identical either way; confidence values will legitimately

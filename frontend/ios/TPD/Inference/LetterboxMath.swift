@@ -9,28 +9,33 @@ import Foundation
 enum LetterboxMath {
     /// Forward transform: source pixels -> square model input.
     struct Params: Equatable, Sendable {
-        /// `min(out / width, out / height)`, deliberately **unclamped**: a crop smaller
-        /// than the model input is upscaled. `PIL.Image.thumbnail` never upscales, but the
-        /// training targets and the reverse map both assume the unclamped scale. See
+        /// `min(1, min(out / width, out / height))` — **clamped**, because `PIL.thumbnail`
+        /// never upscales and that is the convention the model was actually fed:
+        /// `train/keypoint_train.py:220` letterboxes the training *input* through
+        /// `letterbox_resize`. Only the target heatmaps (`tensor_preprocessing.py:120`) use
+        /// an unclamped scale, so training is self-inconsistent below 128 px — but the input
+        /// convention is unambiguous and the backend shares it. See
         /// frontend/ios/README.md, "Decided divergences".
         let scale: CGFloat
         let padX: CGFloat, padY: CGFloat
-        let scaledWidth: CGFloat, scaledHeight: CGFloat
     }
 
     /// Letterbox parameters for fitting `size` into an `output` x `output` square.
     static func letterboxParams(for size: CGSize, output: Int) -> Params {
         let width = max(size.width, 1), height = max(size.height, 1)
         let out = CGFloat(output)
-        let scale = min(out / width, out / height)
-        let scaledWidth = width * scale, scaledHeight = height * scale
-        return Params(scale: scale, padX: (out - scaledWidth) / 2, padY: (out - scaledHeight) / 2,
-                      scaledWidth: scaledWidth, scaledHeight: scaledHeight)
+        let scale = min(1, min(out / width, out / height))
+        return Params(scale: scale, padX: (out - width * scale) / 2, padY: (out - height * scale) / 2)
     }
 
     /// Reverse map: letterboxed model space -> full-frame pixels. Mirrors
     /// `_letterbox_xy_to_bbox_xy`, including its clamp of the crop-local point to
-    /// `0...(bbox side - 1)` before the crop origin is added back.
+    /// `0...(bbox side - 1)` before the crop origin is added back — but **not** its scale.
+    /// The backend inverts with the unclamped `min(out/w, out/h)`, which does not undo the
+    /// forward transform its own `letterbox_resize` applied, so it mis-places keypoints on
+    /// sub-128 crops. Sharing `letterboxParams` here keeps the inverse a true inverse. This
+    /// path only draws overlays — it can never change the predicted class — so being correct
+    /// is worth more than being bug-compatible.
     static func letterboxToFrame(point: CGPoint, bbox: CGRect, output: Int) -> CGPoint {
         // Python takes `max(x2 - x1, 1)`, so a degenerate bbox still divides by 1, and
         // `max(scale, 1e-6)` guards the divide.

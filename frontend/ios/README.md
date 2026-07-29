@@ -112,23 +112,55 @@ These are intentional. Do not "fix" them.
    `backend/api/services/model_service.py` applies a second one, flattening the web demo's
    confidences. iOS softmaxes **once**, matching `inference/inference.py`. Argmax is identical
    either way, so iOS confidence values legitimately read *higher* than the web app.
-2. **Unclamped letterbox scale.** Python's `letterbox_resize` uses `PIL.thumbnail`, which never
-   upscales, but the training targets in `preprocessing/tensor_preprocessing.py` and the reverse
-   map in `backend/api/utils/image_outputs.py::_letterbox_xy_to_bbox_xy` both assume the
-   **unclamped** `scale = min(128/w, 128/h)`. Swift uses the unclamped scale — it always fits the
-   crop to 128 px. This matches training and the reverse map, and diverges from `inference.py`
-   only on sub-128-px crops, which are degenerate.
+2. **Clamped letterbox scale — and a correct reverse map.** `letterbox_resize` is
+   `PIL.thumbnail`, which never upscales, so the forward scale is `min(1, min(128/w, 128/h))`
+   and a crop already smaller than 128 px is pasted at native size on black. Swift does the
+   same. This *reverses* an earlier decision that used the unclamped scale "because it matches
+   training". That premise was false: `train/keypoint_train.py:220` letterboxes the training
+   **input** through `letterbox_resize` too, so the model was fed thumbnailed, never-upscaled
+   crops. Only the *target* heatmaps (`preprocessing/tensor_preprocessing.py:120`) use an
+   unclamped scale, which makes training self-inconsistent below 128 px — the model is
+   unreliable on that branch whatever the client does — but the input convention is
+   unambiguous and the deployed backend shares it. Measured on 12 sub-128 crops through the
+   real stage-2 + stage-3 checkpoint: the unclamped scale flipped the predicted class on 3 of
+   12, every one at a 1.000 softmax margin; clamped agrees 12/12 and its 128x128 buffer is
+   byte-identical to Python's on all 12.
+
+   `letterboxToFrame` uses the same clamped scale, so it is a true inverse of the forward
+   transform. `_letterbox_xy_to_bbox_xy` in `backend/api/utils/image_outputs.py` still divides
+   by the unclamped scale and therefore mis-places keypoints on sub-128 crops. iOS is
+   deliberately correct rather than bug-compatible there: that path only draws overlays and
+   can never change the predicted class.
 3. **Lowercase label names.** The checkpoint ships `['Backhand', 'Forehand', 'Ready_Position',
    'Serve']`. iOS reads the normalized `backhand`, `forehand`, `ready_position`, `serve` from
    `TPDLabels.json`, matching the backend's normalization. Never hardcode the order.
-4. **Resampling: PIL port, and the one place it stops.** `TPDResample` ports Pillow's resampler
-   because no `CIFilter` reproduces PIL's downscale-scaled filter support —
-   `CILanczosScaleTransform` moved the stage-1 crop rect by a median of 34 px (max 89, 0/24
-   frames matching). Stage 1 is now byte-identical to `Image.resize(..., BILINEAR)`, 24/24 rects.
-   Stage 2 matches `letterbox_resize` byte for byte only while both crop sides are under 512 px;
-   past that `PIL.thumbnail`'s `reducing_gap=2.0` box-reduces first and Swift does not, leaving
-   mean |delta| 0.21/255 (worst pixel 22/255) on the 128x128 input. Porting `Image.reduce` is
-   the open item. Never put a `CIFilter` back.
+4. **Resampling: a full PIL port, no residual.** `TPDResample` ports Pillow's resampler because
+   no `CIFilter` reproduces PIL's downscale-scaled filter support — `CILanczosScaleTransform`
+   moved the stage-1 crop rect by a median of 34 px (max 89, 0/24 frames matching). Stage 1 is
+   byte-identical to `Image.resize(..., BILINEAR)`, 24/24 rects. Stage 2 now ports
+   `PIL.thumbnail` in full — `round_aspect` sizing, the `reducing_gap=2.0` `Image.reduce`
+   pre-pass, `_get_safe_box`, and the fact that `_imaging.c` takes the resize box as a C
+   **float** — and is byte-identical to `letterbox_resize` on 66/66 curated crop sizes plus 800
+   random ones. Never put a `CIFilter` back.
+
+   The boundary this file used to claim — byte identity "only while both crop sides are under
+   512 px" — was wrong twice over, and both errors are measured, not argued:
+
+   All figures below come from one scan of every crop size in `1..1399` squared with a side
+   over 128 px — 1940817 sizes, all of which `thumbnail` actually resizes.
+
+   * The pre-reduce factor is `int(side / final_side / reducing_gap)` per axis, and the minor
+     axis's `final_side` is itself about `128 * minor / major`, so it is the **larger** side
+     reaching 512 that arms *both* factors: 0 of the 1940817 have a larger side >= 512 without
+     arming it. The smaller side is not the gate at all — 3273 sizes arm the pre-reduce with
+     **both** sides under 512, extreme aspect ratios where `round_aspect` collapses the minor
+     axis to a pixel or two (4x342 fits to 1x128 and so reduces 2x horizontally).
+   * Independently of the pre-reduce, plain `round()` on the scaled minor side disagrees with
+     `round_aspect` on 9342 of the 1940817 (0.481%): 635 exact `.5` ties, which `round_aspect`
+     breaks toward `floor` where `round()` goes up, and 8707 genuine disagreements because the
+     minor-axis branch minimizes `|aspect - x/n|`, not `|x/aspect - n|`. Each is a 1-px change
+     in the minor axis, which shifts every pasted pixel — so byte identity broke well below
+     512 px too.
 
 ## Privacy keys
 
