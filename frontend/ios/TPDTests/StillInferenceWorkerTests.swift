@@ -21,26 +21,76 @@ final class StillInferenceWorkerTests: XCTestCase {
     /// single `checkCancellation` only caught an exit that beat the actor hop,
     /// and after that decode -> predict -> rasterize ran to the end no matter
     /// what. Measured on this simulator with a 12 MP still, a cancel at 0.5 s
-    /// returned a finished frame 58.4 s later. The bound below is loose on
-    /// purpose — it is here to catch a return to "runs to completion", not to
-    /// police a few seconds of simulator jitter.
+    /// returned a finished frame 58.4 s later.
+    ///
+    /// This asserted a 15 s wall-clock bound and that was the wrong instrument.
+    /// The stages are nothing like equal: timed here at 12 MP they are upright
+    /// 1.2 s, `predict` 52.9 s, rasterize 2.8 s. `predict` is ~95% of the render
+    /// and one uninterruptible call, so whether 15 s was generous or impossible
+    /// came down to which side of the upright/predict boundary the cancel
+    /// happened to land on — 0.6 s if it beat `predict`, 52-56 s if it did not,
+    /// on the same code. That is a coin toss weighted by machine load, and this
+    /// box is a shared one: it went red at 56.6 s on unmodified `main`.
+    ///
+    /// Both of the things the checks actually buy are asserted below instead,
+    /// each against a cost measured in the same run on the same input, so they
+    /// read the same however fast this machine happens to be:
+    ///
+    /// 1. a render cancelled *while it is running* throws instead of handing back
+    ///    a frame — something past the first check is looking at cancellation;
+    /// 2. a render cancelled *before its turn* costs a small fraction of what one
+    ///    that ran costs — the checks sit in front of the work rather than after
+    ///    it, which is the whole reason they earn their keep.
+    ///
+    /// The actor is what makes the second one a fact rather than a race. `render`
+    /// is synchronous, so it cannot be reentered; `queued` is created and
+    /// cancelled while `inFlight` still owns the actor, so it is provably still
+    /// waiting when the cancel reaches it, and what it costs is the interval
+    /// after `inFlight` let go.
     func testCancellingAStillStopsItAtTheNextStageBoundary() async throws {
+        // Warm the engine first: which boundary this caught used to depend on
+        // whether anything else had built the models yet — run alone it cancelled
+        // inside the model load, run in the suite inside `predict`. Now it is
+        // always one of the interior ones.
+        _ = try await StillInferenceWorker.shared.render(try Self.jpeg(320, 240))
         let data = try Self.jpeg(Self.twelveMegapixel.width, Self.twelveMegapixel.height)
-        let worker = StillInferenceWorker.shared
-        let start = Date()
-        let task = Task.detached { try await worker.render(data) }
-        try await Task.sleep(nanoseconds: 500_000_000)
-        task.cancel()
-        var rendered: RenderedFrame?
-        var thrown: Error?
-        do { rendered = try await task.value } catch { thrown = error }
-        let elapsed = Date().timeIntervalSince(start)
 
-        NSLog("TPD test: 12 MP render cancelled at 0.5 s returned at %.1f s", elapsed)
-        XCTAssertNil(rendered, "a cancelled render must not hand back a frame")
-        XCTAssertTrue(thrown is CancellationError, "expected CancellationError, got \(thrown as Any)")
-        XCTAssertLessThan(elapsed, 15, "a render cancelled at 0.5 s took \(elapsed) s — it is no "
-                              + "longer bailing at the stage boundaries in render()")
+        let start = Date()
+        let inFlight = Self.attempt(data)
+        // A lower bound and nothing else: long enough that the render owns the
+        // actor, and shorter than the shortest stage it could be inside — the
+        // decode, 0.5 s here at 12 MP and 1.2 s with the box under load. Load
+        // only widens that margin. Too short and the cancel would beat the task
+        // onto the pool, which makes the first pair of assertions vacuous rather
+        // than wrong; the old 0.5 s was already past the decode half the time,
+        // which is what made its 15 s bound a coin toss.
+        try await Task.sleep(nanoseconds: 250_000_000)
+        // Created and cancelled while the actor is still held, so this one is
+        // known not to have started.
+        let queued = Self.attempt(data)
+        queued.cancel()
+        inFlight.cancel()
+        let ranOutcome = await inFlight.value, queuedOutcome = await queued.value
+
+        // Both intervals end on a stamp taken inside the task that finished, so
+        // the ratio is the worker's doing and not the test's own hops.
+        let ran = ranOutcome.finished.timeIntervalSince(start)
+        let waited = queuedOutcome.finished.timeIntervalSince(ranOutcome.finished)
+        NSLog("TPD test: 12 MP render cancelled in flight returned at %.1f s; one cancelled "
+                  + "before its turn cost %.3f s of that", ran, waited)
+
+        XCTAssertFalse(ranOutcome.producedAFrame,
+                       "a render cancelled 0.25 s in handed back a finished frame — nothing past "
+                           + "the first check in render() is looking at cancellation")
+        XCTAssertTrue(ranOutcome.cancelled, "expected CancellationError, got \(ranOutcome.error)")
+        XCTAssertFalse(queuedOutcome.producedAFrame,
+                       "a render cancelled before its turn handed back a frame")
+        XCTAssertTrue(queuedOutcome.cancelled,
+                      "expected CancellationError, got \(queuedOutcome.error)")
+        XCTAssertLessThan(waited, ran / 4,
+                          "a render cancelled before it started still cost \(waited) s against "
+                              + "\(ran) s for one that ran — the checks in render() are no longer "
+                              + "in front of the work they exist to skip")
     }
 
     /// The queued case, which is what repeated pick-and-exit actually produces:
@@ -125,6 +175,32 @@ final class StillInferenceWorkerTests: XCTestCase {
     }
 
     // MARK: - Fixtures
+
+    /// What one render attempt did. The frame is dropped inside the task rather
+    /// than carried out of it: only whether there was one matters here, and a
+    /// `RenderedFrame` the test holds is a 12 MP bitmap kept alive for nothing.
+    private struct Attempt: Sendable {
+        let producedAFrame: Bool
+        let cancelled: Bool
+        let error: String
+        /// Stamped inside the task the moment `render` returned or threw, so an
+        /// interval between two of these contains no scheduling of the test's own.
+        let finished: Date
+    }
+
+    /// A render on the shared worker, started detached and never throwing out of
+    /// the task: the outcome is data to be compared, not a control flow.
+    private static func attempt(_ data: Data) -> Task<Attempt, Never> {
+        Task.detached {
+            do {
+                _ = try await StillInferenceWorker.shared.render(data)
+                return Attempt(producedAFrame: true, cancelled: false, error: "", finished: Date())
+            } catch {
+                return Attempt(producedAFrame: false, cancelled: error is CancellationError,
+                               error: "\(error)", finished: Date())
+            }
+        }
+    }
 
     /// A JPEG of the requested size: a bright figure-shaped bar on grass green,
     /// so stage 1 has something to put a box around.
