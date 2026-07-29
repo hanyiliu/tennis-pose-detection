@@ -4,8 +4,26 @@
 import SwiftUI
 
 struct LiveCameraView: View {
+    /// `.task(id:)`'s key. Bumping `attempt` restarts the feed; covering the
+    /// screen flips `paused`, which cancels `run()` — the loop's `defer` then
+    /// stops the source. Dismissing flips it back and a fresh run starts,
+    /// re-using models the worker has already loaded.
+    ///
+    /// **Both** the picker and the preview count as covered. Either one hides
+    /// the preview completely, and a capture session plus a three-stage pass per
+    /// frame is not something to keep paying for while nothing it produces can
+    /// be seen — least of all under PHPicker, which is a remote view hosted from
+    /// another process and gets none of that work's benefit.
+    private struct RunKey: Equatable { let attempt: Int, paused: Bool }
+
     @Environment(\.scenePhase) private var scenePhase
     @State private var model = LiveViewModel()
+    @State private var isPicking = false
+    @State private var picked: PickedMedia?
+
+    private var runKey: RunKey {
+        RunKey(attempt: model.attempt, paused: isPicking || picked != nil)
+    }
 
     var body: some View {
         ZStack {
@@ -20,9 +38,14 @@ struct LiveCameraView: View {
         }
         .preferredColorScheme(.dark)
         // Cancelled on disappear; the loop's `defer` stops the source with it.
-        // Keyed on `attempt`: `run()` returns for good when the start fails, so
-        // re-entering the loop means starting a *new* task, not resuming one.
-        .task(id: model.attempt) { await model.run() }
+        // Keyed on `runKey`, whose `attempt` half is the recovery token: `run()`
+        // returns for good when the start fails, so re-entering the loop means
+        // starting a *new* task, not resuming one.
+        .task(id: runKey) { if !runKey.paused { await model.run() } }
+        .mediaPicker(isPresented: $isPicking) { picked = $0 }
+        .fullScreenCover(item: $picked) { media in
+            PhotoPreviewView(media: media) { picked = nil }
+        }
         // The other half of the same promise. The camera-denied state sends the
         // user to Settings; granting access there has to be enough on its own,
         // without them noticing a button back here.
@@ -42,12 +65,10 @@ struct LiveCameraView: View {
         .background(.black.opacity(0.55))
     }
 
-    /// Bottom-left, exactly where the spec puts it — but inert. PR8 replaces the
-    /// empty action with the PhotosPicker sheet and the Photo Preview View behind
-    /// it; until then it is disabled rather than hidden, so the shell of the
-    /// screen is the real one and nothing moves when the picker lands.
+    /// Bottom-left, exactly where the spec puts it. Opens the system picker; the
+    /// selection it reports is presented as `PhotoPreviewView` over this screen.
     private var cameraRollButton: some View {
-        Button {} label: {
+        Button { isPicking = true } label: {
             VStack(spacing: 3) {
                 Image(systemName: "photo.on.rectangle").font(.system(size: 15, weight: .semibold))
                 Text("Library").font(.system(size: 10, weight: .medium))
@@ -58,10 +79,8 @@ struct LiveCameraView: View {
             .foregroundStyle(Color.white)
         }
         .buttonStyle(.plain)
-        .disabled(true)
-        .opacity(0.45)
         .accessibilityLabel("Camera roll")
-        .accessibilityHint("Not available yet")
+        .accessibilityHint("Choose a photo or video from your library")
     }
 
     /// Shown whenever there is no frame to draw — a fresh clone has no bundled
