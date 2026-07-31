@@ -9,7 +9,8 @@
 @MainActor
 final class ResultCache {
     let frameRate: Double
-    private let capacity: Int
+    /// Read by `PreloadPlan`, which sizes its grid to fit inside it rather than overrunning it.
+    let capacity: Int
     private var entries: [Int: TPDResult] = [:]
     private var order: [Int] = []   // least-recently-used first
     /// 600 frames — 20 s at 30 fps. Entries are `TPDResult`s, not frames (~0.5 KB
@@ -37,6 +38,19 @@ final class ResultCache {
         guard let hit = entries[index] else { return nil }
         touch(index)
         return hit
+    }
+    /// The nearest analysed frame within `tolerance` indices of `index`, and which frame it is.
+    /// Preloading at a cadence leaves gaps by construction, and without this every scrub landing
+    /// between two grid frames would be a miss paying ~9.7 s for an answer two frames away.
+    /// Nearer wins, forward breaks ties, and only the entry actually returned is touched — a
+    /// probe must not reorder the eviction queue against the frames the user really visited.
+    func nearest(to index: Int, within tolerance: Int) -> (index: Int, result: TPDResult)? {
+        for offset in 0...max(tolerance, 0) {
+            for candidate in offset == 0 ? [index] : [index + offset, index - offset] {
+                if let hit = value(at: candidate) { return (candidate, hit) }
+            }
+        }
+        return nil
     }
     func insert(_ result: TPDResult, at index: Int) {
         // Overwriting a key changes no count, so only a new entry passes the bound.

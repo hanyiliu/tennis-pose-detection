@@ -109,6 +109,19 @@ actor StillInferenceWorker {
         return try engine.predict(frame)
     }
 
+    /// The preload sweep's way in. A `CGImage` rather than a `VideoFrame` because that sweep
+    /// decodes with `AVAssetImageGenerator` — random access, where a reader is sequential — and
+    /// rendering its output back into a pixel buffer only to match the overload above would cost
+    /// a full-frame copy per frame for nothing: `TPDInferenceEngine` starts from a `CIImage`
+    /// either way. Same two boundaries as `analyse(_:)`; `predict` is one call to the end.
+    func analyse(_ image: CGImage) throws -> TPDResult {
+        try Task.checkCancellation()
+        let engine = try engine ?? makeEngine()
+        self.engine = engine
+        try Task.checkCancellation()
+        return try engine.predict(image: CIImage(cgImage: image))
+    }
+
     /// Lends the export the models this app has already loaded. A second `TPDInferenceEngine`
     /// built for an export would be the per-presentation stacking bug in a different hat: two
     /// copies of both models resident for the minutes a burn-in takes.
