@@ -62,43 +62,37 @@ fallback in `frontend/IOS_IMPLEMENTATION_PLAN.md` §3 — it never emits a broke
 ## The comparison ResNet-18s
 
 `export_comparison.py` emits `TPDResNetKaggle160.mlpackage` (`image` 160×160 RGB **0-255** →
-`logits` (1,4), 21.3 MB), `TPDResNetPose256.mlpackage` (same at 256×256, 21.3 MB) and
-`TPDModelRegistry.json`, which describes all three shipped models. Both checkpoints are
-torchvision-shaped ResNet-18s — 122 state-dict keys, identical to
-`torchvision.models.resnet18(num_classes=4)` — so **timm is not a dependency**. They differ only in
-key prefix and head: `tennis_timm_resnet18_160_best.pth` is unprefixed with a plain `fc`;
-`Resnet_Model/best_model.pt` prefixes every key `model.` and its head is a `Sequential` whose
-`fc.1` is the `Linear`. Both load with **`strict=True`** — a renamed layer must fail the export,
-not load randomly initialised and ship confident garbage. `Resnet_Model`'s own
-`models/pose_classification.py` (an 8-layer plain CNN), `train/train_classification.py` and
-`inference/pose_infer.py` do **not** describe `best_model.pt`; no checkpoint in this repo matches
-that architecture, so the weights are authoritative and that source is stale.
+`logits` (1,4), 21.3 MB), `TPDResNetPose256.mlpackage` (same at 256×256) and
+`TPDModelRegistry.json` — one array of self-describing entries covering all three shipped models, so
+a fourth is an entry rather than a Swift change, while `TPDModelSpec.json`/`TPDLabels.json` stay the
+3-stage model's truth and are *read* by it. `export_comparison.py`'s docstrings cover the rest.
 
-**Two contracts the client must not guess.** (1) Both ResNets return **raw logits**
-(`CrossEntropyLoss`), while the 3-stage `PoseClassificationModel.forward` already softmaxes and
-returns **probabilities** — softmaxing the wrong one is silent, not a crash. (2)
-`Resnet_Model/data/pose_dataset.py` hardcodes `forehand=0, backhand=1`; the Kaggle and 3-stage
-models use the alphabetical `backhand=0, forehand=1`, so indices 0 and 1 mean **opposite** things
-across the two ResNets. Both are recorded per model in the registry (`output.type`, `labels`,
-`labelOrderSource`) and gated by the CONTRACT TRAPS table in `make parity`. The orders come from
-each model's own training source; **no dataset is checked in, so neither has been confirmed against
-real images** — that still needs one on-device check with a known forehand.
+**Three contracts the client must not guess**, each silent when wrong rather than a crash: both
+ResNets emit **raw logits** while the 3-stage model already softmaxed; `pose_dataset.py` hardcodes
+`forehand=0, backhand=1` against the other two's alphabetical order, so indices 0 and 1 mean
+**opposite** things across the two ResNets; and the three class orders are not equally *known*. All
+are per-model registry fields (`output.type`, `labels`, `labelOrder`), and `make parity`'s CONTRACT
+TRAPS table asserts each model's measured convention and preprocessing against those very fields,
+for **every** model — a registry claiming `probabilities` for a logit head fails rather than ships,
+and class order is asserted per classifier because a gate written around "the one model that
+deviates" stops covering the first when a second does. `labelOrder.status` is `derived` when the
+order was read off whatever assigns the indices and `assumed` when not, so the client can surface a
+guess as a guess.
 
-`TPDModelSpec.json` and `TPDLabels.json` are untouched and keep working — they remain the truth for
-the 3-stage model, and the registry *reads* them rather than restating them. The registry is purely
-additive: one array of self-describing entries (`id`, `displayName`, `kind`, `packages`, `input`,
-`output`, `labels`, `labelOrderSource`, `precision`, `minimumDeploymentTarget`, `source`), so a
-fourth model is an entry, not a Swift change — reshaping a format Swift already parses would have
-bought nothing.
+| model | order | status | why |
+|---|---|---|---|
+| `tpd_3stage` | `backhand, forehand, …` | `derived` | the checkpoint's own `label_names` |
+| `resnet18_pose_256` | `forehand, backhand, …` | `derived` | `pose_dataset.py`'s hardcoded `class_to_idx` |
+| `resnet18_kaggle_160` | `backhand, forehand, …` | `assumed` | **not** what its training code does |
 
-**Normalization is baked in.** ImageNet `(x/255 − mean)/std` collapses to a per-channel
-`x * scale + bias` → `scale 0.0171247538 0.0175070028 0.0174291939`,
-`bias −2.11790393 −2.03571429 −1.80444444`. Those cannot live on `ct.ImageType` — its `scale` is a
-scalar, see `Normalized` in `export_comparison.py` for the measured failure — so the packages take
-plain 0-255 RGB and the affine is the graph's first op; same guarantee for the client, which hands
-over an image and cannot get the normalization wrong. The exporter measures the result against the
-real `torchvision.transforms` eval pipeline instead of trusting the algebra (`max|Δ|` 1.5e-07
-Kaggle, 6.6e-07 pose) and refuses to write a package above 1e-4.
+`Kaggle_Model/dataset.py` does have a `sorted()` over class folder names, but it is in the branch
+that rebuilds a split from `image_paths`/`image_labels`: it runs only once labels exist and assigns
+none. The branch that *trains* globs each extension in turn and assigns ids in **first-encounter
+order** — extension then filesystem order, not the alphabet. (Those branches disagree with each
+other too; upstream's bug, not one to inherit.) **No dataset is checked in and no kagglehub cache
+exists, so this repo cannot confirm that order at all** — alphabetical is a guess, shipped as one. A
+still of a known forehand settles it: one word in `SPECS` and a re-export, no Swift and no harness
+change. `resnet18_pose_256`'s is derived but likewise unconfirmed on images.
 
 ## Why the pins are so low
 

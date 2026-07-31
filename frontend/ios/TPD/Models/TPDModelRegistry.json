@@ -9,10 +9,8 @@
       "input": {"name": "image", "size": 256, "mean": [0.0, 0.0, 0.0], "std": [1.0, 1.0, 1.0], "normalizationBakedIn": true},
       "output": {"name": "probs", "type": "probabilities"},
       "labels": ["backhand", "forehand", "ready_position", "serve"],
-      "labelOrderSource": "checkpoint label_names (TPDLabels.json)",
-      "precision": "fp16-unet-fp32-decode-and-stage3",
-      "pipelineSpec": "TPDModelSpec.json",
-      "minimumDeploymentTarget": "iOS17",
+      "labelOrder": {"status": "derived", "source": "checkpoint label_names (TPDLabels.json)"},
+      "build": {"precision": "fp16-unet-fp32-decode-and-stage3", "pipelineSpec": "TPDModelSpec.json", "minimumDeploymentTarget": "iOS17"},
       "source": {"checkpoint": "colab_e2e_best_2.pt", "sha256": "9b3ea8955e0bb2d0c9365f34bf80aac377a86c3393f83a29664c535e4990ef12"}
     },
     {
@@ -23,10 +21,9 @@
       "input": {"name": "image", "size": 160, "mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225], "normalizationBakedIn": true},
       "output": {"name": "logits", "type": "logits"},
       "labels": ["backhand", "forehand", "ready_position", "serve"],
-      "labelOrderSource": "Kaggle_Model/dataset.py: sorted() over the class folder names",
-      "precision": "fp16",
-      "minimumDeploymentTarget": "iOS17",
-      "source": {"checkpoint": "saved_models/tennis_timm_resnet18_160_best.pth", "sha256": "a55460a727dc483efdbfd6166804992f6b72fe5b24b27c1b29078c72d3e64042"}
+      "labelOrder": {"status": "assumed", "source": "Kaggle_Model/dataset.py: first-encounter order over glob(), not alphabetical; unverifiable, no dataset checked in"},
+      "build": {"precision": "fp16", "minimumDeploymentTarget": "iOS17"},
+      "source": {"checkpoint": "tennis_timm_resnet18_160_best.pth", "sha256": "a55460a727dc483efdbfd6166804992f6b72fe5b24b27c1b29078c72d3e64042"}
     },
     {
       "id": "resnet18_pose_256",
@@ -36,10 +33,9 @@
       "input": {"name": "image", "size": 256, "mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225], "normalizationBakedIn": true},
       "output": {"name": "logits", "type": "logits"},
       "labels": ["forehand", "backhand", "ready_position", "serve"],
-      "labelOrderSource": "Resnet_Model/data/pose_dataset.py: class_to_idx (forehand=0!)",
-      "precision": "fp16",
-      "minimumDeploymentTarget": "iOS17",
-      "source": {"checkpoint": "models/Comparison_Models/Resnet_Model/best_model.pt", "sha256": "4e8da0ccbdd62d07b9b80fc415d89ede99cb07d206433b34854527ec5c6f0362"}
+      "labelOrder": {"status": "derived", "source": "Resnet_Model/data/pose_dataset.py: hardcoded class_to_idx (forehand=0!)"},
+      "build": {"precision": "fp16", "minimumDeploymentTarget": "iOS17"},
+      "source": {"checkpoint": "best_model.pt", "sha256": "4e8da0ccbdd62d07b9b80fc415d89ede99cb07d206433b34854527ec5c6f0362"}
     }
   ]
 }

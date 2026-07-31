@@ -63,10 +63,10 @@ export-3stage: venv
 	mkdir -p $(MODELS_DIR)
 	$(PY) $(TOOLS)/export_coreml.py --checkpoint $(CHECKPOINT) --out-dir $(MODELS_DIR)
 
-# The two comparison ResNet-18s plus TPDModelRegistry.json, which describes all three models.
-# The registry reads TPDModelSpec.json/TPDLabels.json, so this must follow export-3stage --
-# `make export` orders them for you.
-export-comparison: venv
+# The two comparison ResNet-18s plus TPDModelRegistry.json, which describes all three models. It
+# READS TPDModelSpec.json/TPDLabels.json, so the prerequisite below is what keeps it after
+# export-3stage even under `make -j`, where it would otherwise describe the PREVIOUS export.
+export-comparison: export-3stage
 	mkdir -p $(MODELS_DIR)
 	$(PY) $(TOOLS)/export_comparison.py --out-dir $(MODELS_DIR)
 
