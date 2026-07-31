@@ -62,12 +62,10 @@ actor InferenceWorker {
 
     /// One frame, start to finish, plus what it cost. Returns `nil` only if the
     /// display raster fails, which is a dropped frame rather than an error worth
-    /// surfacing.
-    ///
-    /// The stamps are `ContinuousClock` reads — monotonic, so a clock adjustment
-    /// cannot produce a negative stage, which `Date` can. The last travels out in
-    /// the `Sample`: the meter needs the *instants* of consecutive passes to see
-    /// the idle between them, not only their lengths.
+    /// surfacing. The stamps are `ContinuousClock` reads — monotonic, so a clock
+    /// adjustment cannot produce a negative stage, which `Date` can — and the last
+    /// travels out in the `Sample`, because the meter needs the *instants* of
+    /// consecutive passes to see the idle between them, not only their lengths.
     func process(_ frame: VideoFrame) throws -> (frame: RenderedFrame,
                                                  cost: PerformanceMeter.Sample)? {
         // Cheap after the first call, and it keeps the engine's existence an

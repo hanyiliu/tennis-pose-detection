@@ -8,15 +8,13 @@ import SwiftUI
 /// material-backed so it stays legible over a bright court.
 ///
 /// **Which fps.** Capture, display and inference run at wildly different rates,
-/// so an unlabelled number would be a guess. This one is inference, and it is
-/// wall-clock — passes ÷ the seconds they spanned, waiting included — the rate
-/// overlays appear at. Deliberately not `1 / cost per frame`, which is larger
-/// and which the panel prints as a cost instead.
+/// so an unlabelled number would be a guess. This one is inference, measured
+/// start of pass to start of pass: the wall-clock rate overlays appear at, idle
+/// included. Not `1 / cost per frame`, which is larger and is printed as a cost.
 struct DiagnosticsHUD: View {
     let stats: PerformanceMeter.Snapshot
-    /// From the configuration the engine was really built with. Core ML has no
-    /// read-back of where it dispatched, so this is a *request*, and is labelled
-    /// as one. `nil` until the models load.
+    /// From the configuration the engine was really built with: a *request*, since
+    /// Core ML has no read-back of where it dispatched. `nil` until the models load.
     let computeUnits: MLComputeUnits?
 
     /// Survives relaunch — which is why the pill sits above the panel, outside its
@@ -58,9 +56,8 @@ struct DiagnosticsHUD: View {
     }
 
     /// Only real measurements and real build metadata, no invented health score.
-    /// Scrolls as soon as the rows stop fitting — at accessibility sizes, at once
-    /// — and the caller caps the height it is offered, so it never reaches the
-    /// controls, whose taps its material would else swallow.
+    /// Scrolls once the rows stop fitting — at accessibility sizes, immediately —
+    /// and the height cap the caller gives it keeps it clear of the controls.
     private var panel: some View {
         ViewThatFits(in: .vertical) {
             rows
@@ -87,8 +84,8 @@ struct DiagnosticsHUD: View {
             row("frames dropped, session", "\(stats.dropped)")
             row("passes completed, session", "\(stats.completed)")
             row("input frame", stats.latest.map { "\($0.width) × \($0.height)" } ?? "—")
-            // A request, never a measurement. Below it is the one dispatch fact
-            // that *is* knowable, and the answer to "why seconds a pass".
+            // A request, never a measurement; below it, the one dispatch fact that
+            // *is* knowable, and the answer to "why seconds a pass".
             row("compute units asked for", Self.units(computeUnits))
             #if targetEnvironment(simulator)
             row("hardware", "Simulator — no Neural Engine")
@@ -139,7 +136,7 @@ struct DiagnosticsHUD: View {
 
     static func window(_ stats: PerformanceMeter.Snapshot) -> String {
         guard let elapsed = stats.windowElapsed else { return "—" }
-        return "\(stats.windowPasses) ÷ \(seconds(elapsed))"
+        return "\(stats.windowPeriods) ÷ \(seconds(elapsed))"
     }
 
     /// Spelled as the API spells it: "CPU + GPU + Neural Engine" was prose for a
@@ -156,9 +153,9 @@ struct DiagnosticsHUD: View {
     }
 }
 
-/// The build metadata half of `TPDModelSpec.json`, decoded separately on purpose:
-/// the spec is the *runtime contract* and fails the whole engine when anything in
-/// it is missing, whereas here a malformed file costs one row in a debug panel.
+/// The build metadata half of `TPDModelSpec.json`, decoded apart from the spec on
+/// purpose: the spec is the runtime contract and fails the whole engine when a
+/// field is missing, whereas a malformed file here costs one row in a panel.
 struct ModelIdentity: Decodable, Sendable, Equatable {
     let bboxModel: String, poseModel: String
     let bboxInputSize: Int, keypointInputSize: Int

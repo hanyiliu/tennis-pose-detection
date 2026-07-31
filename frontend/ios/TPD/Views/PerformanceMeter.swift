@@ -1,27 +1,25 @@
 //  PerformanceMeter.swift
 //  What the live loop cost, as arithmetic. No clock, no UI, no isolation: the
 //  caller stamps the times and this only divides, so every number the HUD shows
-//  is pinned down in XCTest rather than by squinting at a camera feed.
+//  is pinned in XCTest, not by squinting at a camera feed.
 
 import Foundation
 
 /// Rolling statistics over completed inference passes. A `struct` the view model
-/// owns rather than an observable of its own: nothing here ticks, so the HUD
-/// redraws exactly as often as the preview and adds no work to what it measures.
+/// owns rather than an observable: nothing here ticks, so the HUD redraws exactly
+/// as often as the preview and adds no work to what it measures.
 struct PerformanceMeter: Equatable, Sendable {
-    /// One finished pass **and the frame it was measured on**, together: the panel
-    /// prints the dimensions next to the timings, and separate writers are how the
-    /// stale-overlay badge once came to name the wrong frame.
+    /// One finished pass **and the frame it was measured on**: separate writers
+    /// are how the stale-overlay badge once came to name the wrong frame.
     struct Sample: Equatable, Sendable {
         /// Seconds inside `TPDInferenceEngine.predict` — stages 1, 2 and 3 plus
         /// the crop and letterbox between, one uninterruptible call.
         var model: Double
-        /// Seconds inside `CIContext.createCGImage`, the display raster — kept
-        /// apart because it is not inference.
+        /// Seconds inside `CIContext.createCGImage` — apart, as it is not inference.
         var raster: Double
-        /// When the raster finished, on the caller's monotonic clock. **This is
-        /// what makes the headline a rate rather than a reciprocal:** two of these
-        /// bracket the idle between passes, which on device is most of the period.
+        /// When the raster finished, on the caller's monotonic clock. **What makes
+        /// the headline a rate and not a reciprocal:** two of these bound a period,
+        /// idle included, and on device the idle is most of it.
         var finished: ContinuousClock.Instant
         /// Pixel dimensions of the frame the two timings above came from.
         var width: Int
@@ -30,22 +28,21 @@ struct PerformanceMeter: Equatable, Sendable {
         /// What one frame cost, end to end. A duration, not a rate: it knows
         /// nothing about the gaps on either side of it.
         var cost: Double { model + raster }
-        /// The stages run back to back and end at `finished`, so this is a real
-        /// start stamp, not an estimate.
+        /// Stages run back to back and end at `finished`: a stamp, not an estimate.
         var started: ContinuousClock.Instant { finished - .seconds(cost) }
     }
 
     /// Everything the HUD draws, as one value published once per pass.
     struct Snapshot: Equatable, Sendable {
         var latest: Sample?
-        /// **Wall-clock** passes per second: passes ÷ the span from the start of
-        /// the window's oldest pass to the end of its newest. Waiting for a frame
-        /// counts against it, so this is how often an overlay really appears;
-        /// `1 / cost` is a larger number the panel prints as a cost instead.
-        /// `nil`, never `0` and never infinity, until there is something to divide.
+        /// **Wall-clock** passes per second: whole periods ÷ the span from the
+        /// oldest pass's start to the newest one's, so waiting for a frame counts
+        /// against it and this is how often an overlay really appears. `1 / cost`
+        /// is a larger number the panel prints as a cost instead. `nil` — never
+        /// `0`, never infinity — until two starts bound a period to divide by.
         var fps: Double?
-        /// The two halves of that division, printed beside it to be checked.
-        var windowPasses = 0
+        /// The two halves of that division, printed beside it: N samples, N-1 periods.
+        var windowPeriods = 0
         var windowElapsed: Double?
         /// The bracket around `latest.cost`, in the same unit, comparable by eye.
         var cheapest: Double?
@@ -74,18 +71,16 @@ struct PerformanceMeter: Equatable, Sendable {
     var snapshot: Snapshot {
         var stats = Snapshot(latest: recent.last, dropped: dropped, completed: completed)
         guard let oldest = recent.first, let newest = recent.last else { return stats }
-        stats.windowPasses = recent.count
         stats.cheapest = recent.map(\.cost).min()
         stats.dearest = recent.map(\.cost).max()
-        // Start-to-start, so the divisor is whole periods: ending at `finished`
-        // covers N-1 periods but divides by N, and at N == 1 degrades to the 1/cost
-        // reciprocal this row exists to stop reporting. One sample is not a rate.
-        let periods = recent.count - 1
+        // Start-to-start, so the divisor is whole periods: measuring to `finished`
+        // spans N-1 periods plus the newest pass's own cost yet divides by N, and at
+        // N == 1 degrades to the 1/cost reciprocal this row exists to stop printing.
+        stats.windowPeriods = recent.count - 1
         let elapsed = oldest.started.duration(to: newest.started).inSeconds
-        guard periods > 0, elapsed > 0 else { return stats }
-        stats.windowPasses = periods
+        guard stats.windowPeriods > 0, elapsed > 0 else { return stats }
         stats.windowElapsed = elapsed
-        stats.fps = Double(periods) / elapsed
+        stats.fps = Double(stats.windowPeriods) / elapsed
         return stats
     }
 }

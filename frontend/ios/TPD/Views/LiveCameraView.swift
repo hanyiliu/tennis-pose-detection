@@ -37,11 +37,10 @@ struct LiveCameraView: View {
             }
         }
         // Top-leading, inside the safe area; the bottom belongs to the controls.
-        // The height cap is load-bearing: it is what makes the expanded panel
-        // scroll instead of running off the screen, and it stops the panel's
-        // material short of `controls`, which at an accessibility text size it
-        // would otherwise cover and eat every tap aimed at. A bare `.frame` draws
-        // and hit-tests nothing, so the space it reserves stays the preview's.
+        // The height cap is load-bearing: it makes the expanded panel scroll rather
+        // than run off screen, and stops its material short of `controls`, which at
+        // an accessibility size it would else cover and eat every tap aimed at. A
+        // bare `.frame` hit-tests nothing, so the space it reserves stays preview.
         .overlay(alignment: .topLeading) {
             DiagnosticsHUD(stats: model.performance, computeUnits: model.computeUnits)
                 .padding(.horizontal, 14)
