@@ -110,9 +110,9 @@ actor StillInferenceWorker {
     }
 
     /// The preload sweep's way in. A `CGImage` because that sweep decodes with
-    /// `AVAssetImageGenerator`, and rendering its output back into a pixel buffer to match the
-    /// overload above would cost a full-frame copy for nothing: `TPDInferenceEngine` starts from
-    /// a `CIImage` either way. Same two boundaries as `analyse(_:)`.
+    /// `AVAssetImageGenerator`, and rendering it back into a pixel buffer to match the overload
+    /// above costs a full-frame copy for nothing: `TPDInferenceEngine` starts from a `CIImage`
+    /// either way. Same two boundaries as `analyse(_:)`.
     func analyse(_ image: CGImage) throws -> TPDResult {
         try Task.checkCancellation()
         let engine = try engine ?? makeEngine()

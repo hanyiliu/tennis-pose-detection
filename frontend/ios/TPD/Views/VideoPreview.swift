@@ -199,23 +199,21 @@ final class VideoPreviewModel: NSObject {
     private func sync() {
         guard let cache, let frame = shown else { return }
         let seconds = frame.time.seconds, index = cache.index(for: seconds)
-        // Re-aim the sweep first: it picks its next frame from here, so this is what makes the
-        // frame the user just scrubbed to the next one analysed.
+        // Re-aimed first: the sweep picks its next frame from here, so a scrub goes next.
         preload.look(at: index)
         let near = cache.nearest(to: index, within: preload.tolerance)
         let next = Self.resolve(frameAt: seconds, near: near, index: index,
                                 frameRate: cache.frameRate, held: held)
-        // The number the cache exists for, against what is already published rather than just
-        // "there was a hit": a neighbour answers every frame of a played-through clip.
+        // The number the cache exists for, against what is published: a hit alone means nothing.
         if near != nil, next.overlay != overlay {
             NSLog("TPD video: frame at %.2f s got its overlay %.0f ms after appearing",
                   seconds, (CACurrentMediaTime() - shownSince) * 1000)
         }
         (held, overlay) = next
-        // Only an *exact* hit settles the frame on screen: a neighbour's answers a different
-        // question, so the frame the user is parked on still owes a pass of its own or four in
-        // five would show a stranger's pose forever. Deferred while the sweep is live — it owns
-        // the engine, `look` has just aimed it here — so this fires once the sweep is done.
+        // Only an *exact* hit settles the frame on screen: a neighbour answers a different
+        // question, so a parked frame still owes a pass of its own or four in five would show a
+        // stranger's pose forever. Deferred while the sweep owns the engine, and `sweep` announces
+        // every pass — landed or skipped — so this fires the moment the sweep is done.
         guard near?.index != index, !preload.isSweeping, !stopped, analysis == nil else { return }
         analysing = true
         analysis = Task { [weak self] in
@@ -246,8 +244,7 @@ struct VideoPreview: View {
 
     private var badge: some View {
         let here = String(format: "%.2f s", model.time)
-        // "analysing this frame" only when this frame is what is running: while the sweep holds
-        // the engine the work in flight is a neighbour's, and the capsule below says so.
+        // "analysing this frame" only when it is: while the sweep runs, the work is a neighbour's.
         var text = "\(here)  \(model.analysing ? "analysing this frame…" : "no overlay yet")"
         var tint = Color.yellow
         if case .current = model.overlay { text = "\(here)  overlay matches"; tint = .green }
@@ -263,8 +260,7 @@ struct VideoPreview: View {
     }
 
     /// The sweep, stated rather than hidden: at ~9.7 s a frame the user has to see the app work
-    /// through the whole clip before deciding to wait. The cadence is named so "30 frames" over a
-    /// 150-frame clip reads as the subsample it is.
+    /// through the clip. The cadence is named so "30 frames" reads as the subsample it is.
     @ViewBuilder
     private var sweep: some View {
         if let plan = model.preload.plan, plan.total > 0 {

@@ -1,14 +1,13 @@
 //  PreloadCoordinatorTests.swift
-//  The sweep costs ~9.7 s a frame, so what order it runs in, when it stops and what it claims to
-//  have done are checked here as pure scheduling over an injected step, not by watching a clip.
+//  The sweep costs ~9.7 s a frame, so its order, its stopping and what it claims to have done are
+//  checked as scheduling over an injected step, not by watching a clip.
 
 import CoreGraphics
 import Foundation
 import XCTest
 @testable import TPD
 
-/// What the sweep asked for, in order. `@unchecked Sendable` over a lock: the step runs off main
-/// and the test reads it on main.
+/// What the sweep asked for, in order. `@unchecked Sendable` over a lock: the step runs off main.
 private final class Issued: @unchecked Sendable {
     private let lock = NSLock()
     private var indices: [Int] = []
@@ -17,9 +16,8 @@ private final class Issued: @unchecked Sendable {
     func record(_ index: Int) { lock.withLock { indices.append(index) } }
 }
 
-/// A delay that **ignores cancellation**, standing in for the one uninterruptible `predict` in
-/// the middle of every real pass: `Task.sleep` would throw the instant the sweep was cancelled and
-/// so could never exercise the checks that run after the await returns.
+/// A delay that **ignores cancellation**, standing in for the one uninterruptible `predict` every
+/// pass makes: `Task.sleep` would throw before the checks that run after the await ever ran.
 private func stubbornDelay(_ seconds: Double) async {
     await withCheckedContinuation { continuation in
         DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { continuation.resume() }
@@ -40,16 +38,14 @@ final class PreloadCoordinatorTests: XCTestCase {
         XCTAssertEqual(plan.pending, Set(stride(from: 0, to: 51, by: 5)))
         for _ in 0..<6 { order.append(plan.take(nearest: 25) ?? -1) }  // scrubbed to the middle
         XCTAssertEqual(order, [25, 30, 20, 35, 40, 15],
-                       "a front-to-back sweep would have started at 0 and made the user wait for "
-                           + "every frame they skipped")
+                       "a front-to-back sweep starts at 0, making the user sit through the skipped")
         // ...and it re-aims the moment they scrub elsewhere, rather than finishing its ring.
         XCTAssertEqual(plan.take(nearest: 0), 0)
         XCTAssertEqual(plan.take(nearest: 50), 50)
     }
 
-    /// Preloading must not push the cache past its bound: a sweep that outgrew it would spend
-    /// ~9.7 s a frame evicting its own answers, so the cadence absorbs the clip's length — and the
-    /// tolerance, which has to stay inside a stroke phase, must not follow the cadence up.
+    /// Preloading must not push the cache past its bound — a sweep that outgrew it would spend
+    /// ~9.7 s a frame evicting its own answers — and the tolerance must not follow the cadence up.
     func testTheCadenceRisesUntilThePlanFitsTheCacheButTheToleranceStaysAStrokePhase() {
         let clip = PreloadPlan(frameCount: 150, cadence: 5, capacity: 600, frameRate: 30)
         XCTAssertEqual([clip.cadence, clip.total, clip.tolerance], [5, 30, 2])
@@ -59,8 +55,7 @@ final class PreloadCoordinatorTests: XCTestCase {
                                  "the plan scheduled \(long.total) frames into a 600-entry cache")
         XCTAssertEqual(long.cadence, 60)
         XCTAssertEqual(long.tolerance, 2,
-                       "half this cadence is \(long.cadence / 2) frames — a full second of clip, "
-                           + "several stroke phases away from the frame on screen")
+                       "half this cadence is \(long.cadence / 2) frames — a second of clip away")
         // The bound is 75 ms of clip whatever the frame rate, so it converts rather than hardcodes.
         XCTAssertEqual(PreloadPlan(frameCount: 36_000, cadence: 5, capacity: 600,
                                    frameRate: 60).tolerance, 4)
@@ -70,8 +65,7 @@ final class PreloadCoordinatorTests: XCTestCase {
     }
 
     /// "analysed N of M" is on screen while the user decides whether to wait, so N may only rise,
-    /// may never pass M, and a frame the decoder refuses leaves the denominator rather than
-    /// stranding the sweep one short forever.
+    /// may never pass M, and a refused frame leaves M rather than stranding the sweep one short.
     func testProgressOnlyRisesNeverPassesTheTotalAndAlwaysReachesIt() {
         var plan = PreloadPlan(frameCount: 20, cadence: 5, capacity: 600)
         XCTAssertEqual([plan.total, plan.analysed], [4, 0])
@@ -92,10 +86,9 @@ final class PreloadCoordinatorTests: XCTestCase {
                        "a frame the decoder refused stayed in the denominator forever")
     }
 
-    /// The sweep's whole lifecycle, each stage measured against what the same interval bought
-    /// while it ran, so it reads the same however fast this machine is. An export holds the one
-    /// engine for minutes and a sweep beside it only lengthens the wait the user is watching, so
-    /// Share suspends it, closing the card resumes it intact, and leaving cancels it for good.
+    /// The sweep's whole lifecycle, each stage measured against what the same interval bought while
+    /// it ran, so it reads the same however fast this machine is. An export holds the one engine
+    /// for minutes, so Share suspends the sweep, closing the card resumes it, leaving cancels it.
     func testASweepSuspendsForAnExportResumesIntactAndCancelsForGood() async throws {
         let cache = ResultCache(frameRate: 30), issued = Issued()
         let coordinator = PreloadCoordinator()
@@ -109,9 +102,8 @@ final class PreloadCoordinatorTests: XCTestCase {
         let atSuspend = issued.count
         try await Task.sleep(nanoseconds: 400_000_000)
         // One more may already have been taken when it landed; nothing beyond that.
-        XCTAssertLessThanOrEqual(issued.count - atSuspend, 1,
-                                 "a suspended sweep issued \(issued.count - atSuspend) more frames "
-                                     + "against \(running) in the same interval running")
+        XCTAssertLessThanOrEqual(issued.count - atSuspend, 1, "a suspended sweep issued "
+                                 + "\(issued.count - atSuspend) more, against \(running) running")
         coordinator.resume()                                     // the export card closed
         try await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertGreaterThan(issued.count - atSuspend, 2, "the sweep never picked back up")
@@ -126,9 +118,8 @@ final class PreloadCoordinatorTests: XCTestCase {
                        "progress counted a frame the cache never got")
     }
 
-    /// A new pick supersedes the old sweep rather than racing it. The step ignores cancellation
-    /// on purpose: the pass in flight when the second clip arrives *will* finish, and what must
-    /// not happen is its result landing anywhere.
+    /// A new pick supersedes the old sweep rather than racing it. The step ignores cancellation on
+    /// purpose: the pass in flight *will* finish, and its result must not land anywhere.
     func testASecondPickAbandonsTheSweepAlreadyInFlight() async throws {
         let abandoned = ResultCache(frameRate: 30), current = ResultCache(frameRate: 30)
         let first = Issued(), second = Issued()
@@ -143,15 +134,13 @@ final class PreloadCoordinatorTests: XCTestCase {
         let issuedBefore = first.count
         try await Task.sleep(nanoseconds: 600_000_000)
         XCTAssertEqual(first.count, issuedBefore, "the superseded sweep kept issuing work")
-        XCTAssertEqual(abandoned.count, 0,
-                       "a pass from the previous clip landed in its cache after it was replaced")
+        XCTAssertEqual(abandoned.count, 0, "a pass from the replaced clip landed in its cache")
         XCTAssertEqual(coordinator.plan?.total, 4, "the plan still describes the previous clip")
         XCTAssertEqual(current.count, 4)
         XCTAssertEqual(second.value.sorted(), [0, 5, 10, 15])
     }
 
-    /// The sweep and the preview's opportunistic pass share one cache, so a frame the user already
-    /// waited for must not be paid for twice — but it still counts, or progress never reaches M.
+    /// A frame the user already waited for must not be paid for twice — but it still counts.
     func testFramesTheCacheAlreadyHasCostNothingAndStillCount() async throws {
         let cache = ResultCache(frameRate: 30), issued = Issued()
         for index in [0, 5, 10] { cache.insert(stub(CGFloat(index)), at: index) }
@@ -168,9 +157,35 @@ final class PreloadCoordinatorTests: XCTestCase {
         XCTAssertEqual(cache.value(at: 0), stub(0), "a cached answer was overwritten")
     }
 
-    /// Why a cadence above 1 is usable at all: a scrub landing between two grid frames is served
-    /// by its neighbour, badged with the frame that neighbour really is — and still owed a pass of
-    /// its own, which `sync()`'s guard now allows.
+    /// The own-pass guarantee has to hold on the error path too. A frame parked off the grid holds
+    /// its own pass back until the sweep gives the engine up, so a sweep whose last pass ends in a
+    /// skip and announces nothing leaves it on a stranger's pose for good — the very thing serving
+    /// a neighbour has to avoid. The closure is `sync()`'s guard: its own pass once the sweep ends.
+    func testASweepEndingInASkipStillLetsTheParkedFrameGetItsOwnPass() async throws {
+        let cache = ResultCache(frameRate: 30), coordinator = PreloadCoordinator()
+        let parked = 12, own = stub(99)   // off the cadence-5 grid: only frame 10 can serve it
+        coordinator.onResult = {
+            guard !coordinator.isSweeping, cache.value(at: parked) == nil else { return }
+            cache.insert(own, at: parked)
+        }
+        coordinator.begin(frameCount: 20, cadence: 5, cache: cache) { index in
+            await stubbornDelay(0.01)
+            // 15 is last from a playhead at 0, so the sweep ends in `drop()`, not `complete()`.
+            if index == 15 { throw CocoaError(.fileReadCorruptFile) }
+            return stub(CGFloat(index))
+        }
+        for _ in 0..<80 where coordinator.plan?.isComplete != true {
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        XCTAssertEqual([coordinator.plan?.analysed, coordinator.plan?.total], [3, 3],
+                       "the refused frame never left the denominator, so the sweep never ended")
+        XCTAssertEqual(cache.nearest(to: parked, within: 2)?.index, parked)
+        XCTAssertEqual(cache.value(at: parked), own, "the sweep ended in a skip and said nothing, "
+                       + "so the parked frame kept frame 10's pose with no pass of its own coming")
+    }
+
+    /// Why a cadence above 1 is usable at all: a scrub between two grid frames is served by its
+    /// neighbour, badged with the frame that neighbour really is — and still owed its own pass.
     func testAPreloadedNeighbourIsShownInsteadOfPayingForAnotherPass() {
         let cache = ResultCache(frameRate: 30)
         cache.insert(stub(10), at: 10)
