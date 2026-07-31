@@ -41,9 +41,7 @@ actor InferenceWorker {
     /// isolation domain — so `CIContext()` would be constructed on main. Smaller
     /// than the model load, same trap.
     private var display: CIContext?
-    /// Read back by the HUD. Taken from the configuration object actually handed
-    /// to the engine, not from a second `MLModelConfiguration()` made later, so
-    /// the panel cannot drift into reporting a policy this app never requested.
+    /// Read back by the HUD, from the configuration actually handed to the engine.
     private(set) var computeUnits: MLComputeUnits?
 
     /// Loads both Core ML models, off the main actor. Idempotent, so a caller
@@ -66,10 +64,10 @@ actor InferenceWorker {
     /// display raster fails, which is a dropped frame rather than an error worth
     /// surfacing.
     ///
-    /// The three stamps are `ContinuousClock` reads — monotonic, so a clock
-    /// adjustment cannot produce a negative stage, which `Date` can. They bracket
-    /// calls this method already made and add nothing to either: the measurement
-    /// costs two clock reads against a ~10 s pass.
+    /// The stamps are `ContinuousClock` reads — monotonic, so a clock adjustment
+    /// cannot produce a negative stage, which `Date` can. The last travels out in
+    /// the `Sample`: the meter needs the *instants* of consecutive passes to see
+    /// the idle between them, not only their lengths.
     func process(_ frame: VideoFrame) throws -> (frame: RenderedFrame,
                                                  cost: PerformanceMeter.Sample)? {
         // Cheap after the first call, and it keeps the engine's existence an
@@ -87,6 +85,7 @@ actor InferenceWorker {
         let cost = PerformanceMeter.Sample(
             model: started.duration(to: predicted).inSeconds,
             raster: predicted.duration(to: rasterized).inSeconds,
+            finished: rasterized,
             width: Int(image.extent.width.rounded()),
             height: Int(image.extent.height.rounded()))
         return (RenderedFrame(image: raster, result: result), cost)
@@ -112,16 +111,14 @@ final class LiveViewModel {
     /// back from Settings finds the loop already gone.
     private(set) var attempt = 0
     var overlay = OverlayOptions()
-    /// What the HUD draws. Assigned once per completed pass — which is also the
-    /// only moment `frame` changes — so the diagnostics cost the view exactly one
-    /// extra invalidation per inference and never drive a redraw of their own.
+    /// What the HUD draws. Assigned once per completed pass — the only moment
+    /// `frame` changes too — so it costs no redraw of its own.
     private(set) var performance = PerformanceMeter.Snapshot()
     private(set) var computeUnits: MLComputeUnits?
 
-    /// `@ObservationIgnored` because `drop()` fires at capture rate, up to 60 Hz.
-    /// No view reads this — they read `performance` — so registering a mutation
-    /// that often would be pure overhead on the main actor, which is the one
-    /// thing a diagnostic must not take away from the pipeline it watches.
+    /// `@ObservationIgnored` because `drop()` fires at capture rate, up to 60 Hz,
+    /// and no view reads it — they read `performance`. Registering a mutation that
+    /// often is main-actor time a diagnostic must not take from what it watches.
     @ObservationIgnored private var meter = PerformanceMeter()
 
     /// Held rather than made per run, so a retry re-uses models already loaded
@@ -167,9 +164,8 @@ final class LiveViewModel {
         }
         failure = nil
         for await video in stream {
-            // The drop is counted where it happens. It is one increment on a
-            // branch that already existed, and it is the only honest place to
-            // learn how far ahead of inference capture is running.
+            // Counted where it happens: one increment on a branch that already
+            // existed, and the only honest place to see capture outrun inference.
             guard !isInferring else { meter.drop(); continue }
             isInferring = true
             // Inherits this actor, so it resumes on main to publish — but the
