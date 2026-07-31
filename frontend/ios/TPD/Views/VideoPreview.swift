@@ -36,8 +36,7 @@ final class VideoPreviewModel: NSObject {
     private(set) var time: Double = 0
     private(set) var duration: Double = 0
     private(set) var failure: String?
-    /// A pass for the frame on screen is in flight. Published because the badge claims it, and
-    /// with the sweep answering most frames from a neighbour that is now rarely true.
+    /// A pass for the frame on screen is in flight; published because the badge claims it.
     private(set) var analysing = false
     var result: TPDResult? { held?.result }   // never set without its timestamp
     @ObservationIgnored private var player: AVPlayer?
@@ -83,8 +82,8 @@ final class VideoPreviewModel: NSObject {
             let cache = ResultCache(frameRate: Double(try await track.load(.nominalFrameRate)))
             self.cache = cache
             guard !stopped else { return }
-            // The whole clip, from frame 0 until the first tick moves the playhead. Nothing below
-            // waits on it: the sweep is a task whose every step is an await off this actor.
+            // The whole clip, from frame 0 until the first tick moves the playhead. Nothing waits
+            // on it: the sweep is a task whose every step is an await off this actor.
             preload.onResult = { [weak self] in self?.sync() }
             preload.begin(url: url, frameCount: Int((duration * cache.frameRate).rounded()),
                           frameRate: cache.frameRate, cache: cache)
@@ -184,11 +183,8 @@ final class VideoPreviewModel: NSObject {
         if let cached { return (Held(result: cached, time: seconds), .current) }
         return (held, held.map { Overlay.stale($0.time) } ?? .none)
     }
-    /// The neighbour-tolerant form the sweep needs: a grid at cadence 5 leaves four frames in
-    /// five unanalysed, and insisting on an exact hit would throw away most of what it produced.
-    /// A result from within the tolerance is a real answer, just not this frame's, so it is held
-    /// with **its own** time and badged `.stale` — the promise the badge has always made. Exact
-    /// hits fall through to `resolve` above unchanged.
+    /// The neighbour-tolerant form the sweep needs: a result from within the tolerance is a real
+    /// answer, just not this frame's, so it is held with **its own** time and badged `.stale`.
     static func resolve(frameAt seconds: Double, near: (index: Int, result: TPDResult)?,
                         index: Int, frameRate: Double,
                         held: Held?) -> (held: Held?, overlay: Overlay) {
@@ -203,25 +199,24 @@ final class VideoPreviewModel: NSObject {
     private func sync() {
         guard let cache, let frame = shown else { return }
         let seconds = frame.time.seconds, index = cache.index(for: seconds)
-        // Re-aim the sweep before asking it anything: it picks its next frame from here, so this
-        // is what makes the frame the user just scrubbed to the next one analysed.
+        // Re-aim the sweep first: it picks its next frame from here, so this is what makes the
+        // frame the user just scrubbed to the next one analysed.
         preload.look(at: index)
         let near = cache.nearest(to: index, within: preload.tolerance)
         let next = Self.resolve(frameAt: seconds, near: near, index: index,
                                 frameRate: cache.frameRate, held: held)
-        // The number the cache exists for, compared against what is already published rather than
-        // just "there was a hit": a neighbour answers every frame of a played-through clip, and
-        // logging each would bury the transition this line exists to time.
+        // The number the cache exists for, against what is already published rather than just
+        // "there was a hit": a neighbour answers every frame of a played-through clip.
         if near != nil, next.overlay != overlay {
             NSLog("TPD video: frame at %.2f s got its overlay %.0f ms after appearing",
                   seconds, (CACurrentMediaTime() - shownSince) * 1000)
         }
         (held, overlay) = next
-        // No pass out of turn while the sweep is live: it owns the engine, `look` has just aimed
-        // it here, and a second pass would only take the engine away from the answer coming. What
-        // is left for this path is the window before a plan exists, and a finished sweep with a
-        // hole in it — a frame the decoder refused.
-        guard near == nil, !preload.isSweeping, !stopped, analysis == nil else { return }
+        // Only an *exact* hit settles the frame on screen: a neighbour's answers a different
+        // question, so the frame the user is parked on still owes a pass of its own or four in
+        // five would show a stranger's pose forever. Deferred while the sweep is live — it owns
+        // the engine, `look` has just aimed it here — so this fires once the sweep is done.
+        guard near?.index != index, !preload.isSweeping, !stopped, analysis == nil else { return }
         analysing = true
         analysis = Task { [weak self] in
             let fresh = try? await cache.result(at: index) {
@@ -251,7 +246,7 @@ struct VideoPreview: View {
 
     private var badge: some View {
         let here = String(format: "%.2f s", model.time)
-        // "analysing this frame" only when this frame is what is running: with the sweep holding
+        // "analysing this frame" only when this frame is what is running: while the sweep holds
         // the engine the work in flight is a neighbour's, and the capsule below says so.
         var text = "\(here)  \(model.analysing ? "analysing this frame…" : "no overlay yet")"
         var tint = Color.yellow
@@ -267,9 +262,9 @@ struct VideoPreview: View {
             .background(.black.opacity(0.65), in: Capsule())
     }
 
-    /// The sweep, stated rather than hidden: at ~9.7 s a frame the user has to see that the app
-    /// is working through the whole clip, and how far it has got, before deciding to wait. The
-    /// cadence is named so "30 frames" over a 150-frame clip reads as the subsample it is.
+    /// The sweep, stated rather than hidden: at ~9.7 s a frame the user has to see the app work
+    /// through the whole clip before deciding to wait. The cadence is named so "30 frames" over a
+    /// 150-frame clip reads as the subsample it is.
     @ViewBuilder
     private var sweep: some View {
         if let plan = model.preload.plan, plan.total > 0 {
@@ -282,8 +277,7 @@ struct VideoPreview: View {
                 ProgressView(value: Double(plan.analysed), total: Double(max(plan.total, 1)))
                     .frame(width: 170)
             }
-            .tint(tint).foregroundStyle(tint)
-            .padding(.horizontal, 12).padding(.vertical, 7)
+            .tint(tint).foregroundStyle(tint).padding(.horizontal, 12).padding(.vertical, 7)
             .background(.black.opacity(0.65),
                         in: RoundedRectangle(cornerRadius: 13, style: .continuous))
             .accessibilityElement(children: .combine)

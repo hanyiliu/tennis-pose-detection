@@ -39,11 +39,10 @@ final class ResultCache {
         touch(index)
         return hit
     }
-    /// The nearest analysed frame within `tolerance` indices of `index`, and which frame it is.
-    /// Preloading at a cadence leaves gaps by construction, and without this every scrub landing
-    /// between two grid frames would be a miss paying ~9.7 s for an answer two frames away.
-    /// Nearer wins, forward breaks ties, and only the entry actually returned is touched — a
-    /// probe must not reorder the eviction queue against the frames the user really visited.
+    /// The nearest analysed frame within `tolerance` indices of `index`, and which frame it is:
+    /// preloading at a cadence leaves gaps, and without this every scrub landing between two grid
+    /// frames would be a miss paying ~9.7 s for an answer two frames away. Nearer wins, forward
+    /// breaks ties, and only the entry returned is touched — a probe must not reorder eviction.
     func nearest(to index: Int, within tolerance: Int) -> (index: Int, result: TPDResult)? {
         for offset in 0...max(tolerance, 0) {
             for candidate in offset == 0 ? [index] : [index + offset, index - offset] {

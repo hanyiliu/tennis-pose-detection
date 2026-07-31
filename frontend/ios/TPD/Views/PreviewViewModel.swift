@@ -109,11 +109,10 @@ actor StillInferenceWorker {
         return try engine.predict(frame)
     }
 
-    /// The preload sweep's way in. A `CGImage` rather than a `VideoFrame` because that sweep
-    /// decodes with `AVAssetImageGenerator` — random access, where a reader is sequential — and
-    /// rendering its output back into a pixel buffer only to match the overload above would cost
-    /// a full-frame copy per frame for nothing: `TPDInferenceEngine` starts from a `CIImage`
-    /// either way. Same two boundaries as `analyse(_:)`; `predict` is one call to the end.
+    /// The preload sweep's way in. A `CGImage` because that sweep decodes with
+    /// `AVAssetImageGenerator`, and rendering its output back into a pixel buffer to match the
+    /// overload above would cost a full-frame copy for nothing: `TPDInferenceEngine` starts from
+    /// a `CIImage` either way. Same two boundaries as `analyse(_:)`.
     func analyse(_ image: CGImage) throws -> TPDResult {
         try Task.checkCancellation()
         let engine = try engine ?? makeEngine()
