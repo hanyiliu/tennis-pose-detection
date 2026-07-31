@@ -43,7 +43,11 @@ struct PhotoPreviewView: View {
                 case .loading, .failed: EmptyView()
                 }
             }
-            if let export { ExportProgressView(model: export) { self.export = nil } }
+            // A sibling layer, not a screen of its own: `VideoPreview` never disappears behind it,
+            // so the sweep it owns is stood down and picked back up from here.
+            if let export {
+                ExportProgressView(model: export) { self.export = nil; video.preload.resume() }
+            }
         }
         .preferredColorScheme(.dark)
         .task { await model.load(media) }
@@ -108,6 +112,8 @@ struct PhotoPreviewView: View {
         let url: URL? = if case .video(let url) = model.stage { url } else { nil }
         return Button {
             guard let url else { return }
+            // Before the snapshot, so it carries off everything the sweep produced.
+            video.preload.suspend()
             let started = ExportViewModel()
             started.start(source: url, overlay: model.overlay, snapshot: video.analysed)
             export = started

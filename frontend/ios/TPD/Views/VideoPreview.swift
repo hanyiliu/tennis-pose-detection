@@ -36,11 +36,15 @@ final class VideoPreviewModel: NSObject {
     private(set) var time: Double = 0
     private(set) var duration: Double = 0
     private(set) var failure: String?
+    /// A pass for the frame on screen is in flight; published because the badge claims it.
+    private(set) var analysing = false
     var result: TPDResult? { held?.result }   // never set without its timestamp
     @ObservationIgnored private var player: AVPlayer?
     @ObservationIgnored private var output: AVPlayerItemVideoOutput?
     @ObservationIgnored private var link: CADisplayLink?
     @ObservationIgnored private var cache: ResultCache?
+    /// Itself `@Observable`, so the badge reading `model.preload.plan` tracks the sweep.
+    let preload = PreloadCoordinator()
     @ObservationIgnored private let raster = FrameRasterizer()
     @ObservationIgnored private var shown: VideoFrame?   // on screen; sync() re-targets
     @ObservationIgnored private var shownSince: CFTimeInterval = 0
@@ -75,8 +79,14 @@ final class VideoPreviewModel: NSObject {
             guard !stopped else { return }
             duration = max(try await asset.load(.duration).seconds, 0)
             guard !stopped else { return }
-            cache = ResultCache(frameRate: Double(try await track.load(.nominalFrameRate)))
+            let cache = ResultCache(frameRate: Double(try await track.load(.nominalFrameRate)))
+            self.cache = cache
             guard !stopped else { return }
+            // The whole clip, from frame 0 until the first tick moves the playhead. Nothing waits
+            // on it: the sweep is a task whose every step is an await off this actor.
+            preload.onResult = { [weak self] in self?.sync() }
+            preload.begin(url: url, frameCount: Int((duration * cache.frameRate).rounded()),
+                          frameRate: cache.frameRate, cache: cache)
             let item = AVPlayerItem(asset: asset); item.videoComposition = composition
             let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
@@ -95,6 +105,7 @@ final class VideoPreviewModel: NSObject {
     /// `analyse` re-checks at its boundaries; the temp copy is ours to bin.
     func stop() {
         stopped = true
+        preload.cancel()
         analysis?.cancel(); analysis = nil
         link?.invalidate(); link = nil
         player?.pause(); shown = nil; resuming = false
@@ -172,23 +183,44 @@ final class VideoPreviewModel: NSObject {
         if let cached { return (Held(result: cached, time: seconds), .current) }
         return (held, held.map { Overlay.stale($0.time) } ?? .none)
     }
+    /// The neighbour-tolerant form the sweep needs: a result from within the tolerance is a real
+    /// answer, just not this frame's, so it is held with **its own** time and badged `.stale`.
+    static func resolve(frameAt seconds: Double, near: (index: Int, result: TPDResult)?,
+                        index: Int, frameRate: Double,
+                        held: Held?) -> (held: Held?, overlay: Overlay) {
+        guard let near, near.index != index else {
+            return resolve(frameAt: seconds, cached: near?.result, held: held)
+        }
+        let at = Double(near.index) / (frameRate > 0 ? frameRate : 30)
+        return (Held(result: near.result, time: at), .stale(at))
+    }
     /// One place decides the overlay and the next pass, one at a time; re-entered
     /// when a pass lands, because the frame on screen has usually moved on.
     private func sync() {
         guard let cache, let frame = shown else { return }
         let seconds = frame.time.seconds, index = cache.index(for: seconds)
-        let hit = cache.value(at: index)
-        if hit != nil, overlay != .current {   // the number the cache exists for
+        // Re-aimed first: the sweep picks its next frame from here, so a scrub goes next.
+        preload.look(at: index)
+        let near = cache.nearest(to: index, within: preload.tolerance)
+        let next = Self.resolve(frameAt: seconds, near: near, index: index,
+                                frameRate: cache.frameRate, held: held)
+        // The number the cache exists for, against what is published: a hit alone means nothing.
+        if near != nil, next.overlay != overlay {
             NSLog("TPD video: frame at %.2f s got its overlay %.0f ms after appearing",
                   seconds, (CACurrentMediaTime() - shownSince) * 1000)
         }
-        (held, overlay) = Self.resolve(frameAt: seconds, cached: hit, held: held)
-        guard hit == nil, !stopped, analysis == nil else { return }
+        (held, overlay) = next
+        // Only an *exact* hit settles the frame on screen: a neighbour answers a different
+        // question, so a parked frame still owes a pass of its own or four in five would show a
+        // stranger's pose forever. Deferred while the sweep owns the engine, and `sweep` announces
+        // every pass — landed or skipped — so this fires the moment the sweep is done.
+        guard near?.index != index, !preload.isSweeping, !stopped, analysis == nil else { return }
+        analysing = true
         analysis = Task { [weak self] in
             let fresh = try? await cache.result(at: index) {
                 try await StillInferenceWorker.shared.analyse(frame) }
             guard let self else { return }
-            analysis = nil
+            analysis = nil; analysing = false
             if let fresh { held = Held(result: fresh, time: seconds) }
             sync()
         }
@@ -204,7 +236,7 @@ struct VideoPreview: View {
             FramePreview(image: model.image)
             OverlayCanvas(result: model.result, options: options)   // stale: still
                 .opacity(model.overlay == .current ? 1 : 0.3)          // informative
-            VStack(spacing: 0) { badge.padding(.top, 54); Spacer(minLength: 0) }
+            VStack(spacing: 6) { badge.padding(.top, 54); sweep; Spacer(minLength: 0) }
         }
         .task { await model.start(url: url) }
         .onDisappear { model.stop() }
@@ -212,15 +244,39 @@ struct VideoPreview: View {
 
     private var badge: some View {
         let here = String(format: "%.2f s", model.time)
-        var text = "\(here)  analysing this frame…", tint = Color.yellow
+        // "analysing this frame" only when it is: while the sweep runs, the work is a neighbour's.
+        var text = "\(here)  \(model.analysing ? "analysing this frame…" : "no overlay yet")"
+        var tint = Color.yellow
         if case .current = model.overlay { text = "\(here)  overlay matches"; tint = .green }
         if case .stale(let at) = model.overlay {
-            text = String(format: "%@  overlay is from %.2f s — analysing", here, at); tint = .orange
+            text = String(format: "%@  overlay is from %.2f s%@", here, at,
+                          model.analysing ? " — analysing" : ""); tint = .orange
         }
         if let failure = model.failure { text = failure; tint = .red }
         return Text(text)
             .font(.system(size: 11, weight: .medium).monospacedDigit()).foregroundStyle(tint)
             .padding(.horizontal, 11).padding(.vertical, 6)
             .background(.black.opacity(0.65), in: Capsule())
+    }
+
+    /// The sweep, stated rather than hidden: at ~9.7 s a frame the user has to see the app work
+    /// through the clip. The cadence is named so "30 frames" reads as the subsample it is.
+    @ViewBuilder
+    private var sweep: some View {
+        if let plan = model.preload.plan, plan.total > 0 {
+            let scope = plan.cadence == 1 ? "every frame" : "every \(plan.cadence)th frame"
+            let tint = plan.isComplete ? Color.green : Color.yellow
+            VStack(spacing: 5) {
+                Text(plan.isComplete ? "clip analysed · \(plan.total) frames"
+                                     : "analysing \(scope) · \(plan.analysed) of \(plan.total)")
+                    .font(.system(size: 11, weight: .medium).monospacedDigit())
+                ProgressView(value: Double(plan.analysed), total: Double(max(plan.total, 1)))
+                    .frame(width: 170)
+            }
+            .tint(tint).foregroundStyle(tint).padding(.horizontal, 12).padding(.vertical, 7)
+            .background(.black.opacity(0.65),
+                        in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+            .accessibilityElement(children: .combine)
+        }
     }
 }
