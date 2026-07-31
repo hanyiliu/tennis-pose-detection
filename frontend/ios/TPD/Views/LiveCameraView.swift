@@ -36,6 +36,13 @@ struct LiveCameraView: View {
                 controls
             }
         }
+        // Top-leading and inside the safe area: the bottom belongs to the
+        // controls, and the empty state is centred, so nothing here is covered.
+        .overlay(alignment: .topLeading) {
+            DiagnosticsHUD(stats: model.performance, computeUnits: model.computeUnits)
+                .padding(.horizontal, 14)
+                .padding(.top, 6)
+        }
         .preferredColorScheme(.dark)
         // Cancelled on disappear; the loop's `defer` stops the source with it.
         // Keyed on `runKey`, whose `attempt` half is the recovery token: `run()`
