@@ -77,12 +77,15 @@ struct PerformanceMeter: Equatable, Sendable {
         stats.windowPasses = recent.count
         stats.cheapest = recent.map(\.cost).min()
         stats.dearest = recent.map(\.cost).max()
-        // A monotonic clock can report the same instant twice for work shorter
-        // than its tick; that reads as "not measurable", not as infinitely fast.
-        let elapsed = oldest.started.duration(to: newest.finished).inSeconds
-        guard elapsed > 0 else { return stats }
+        // Start-to-start, so the divisor is whole periods: ending at `finished`
+        // covers N-1 periods but divides by N, and at N == 1 degrades to the 1/cost
+        // reciprocal this row exists to stop reporting. One sample is not a rate.
+        let periods = recent.count - 1
+        let elapsed = oldest.started.duration(to: newest.started).inSeconds
+        guard periods > 0, elapsed > 0 else { return stats }
+        stats.windowPasses = periods
         stats.windowElapsed = elapsed
-        stats.fps = Double(recent.count) / elapsed
+        stats.fps = Double(periods) / elapsed
         return stats
     }
 }

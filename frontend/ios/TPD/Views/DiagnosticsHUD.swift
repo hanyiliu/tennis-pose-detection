@@ -77,15 +77,15 @@ struct DiagnosticsHUD: View {
     private var rows: some View {
         VStack(alignment: .leading, spacing: 5) {
             row("inference rate", stats.fps.map { "\(Self.rate($0)) fps" } ?? "measuring…")
-            // The division that produced the row above, so the headline can be
-            // checked against the costs below rather than taken on trust.
-            row("passes ÷ elapsed", Self.window(stats))
+            // The literal division above it, checkable by hand. Periods, not passes:
+            // N samples span N-1 gaps. Window rows; the counters below are session.
+            row("periods ÷ elapsed", Self.window(stats))
             row("stages 1–3", stats.latest.map { Self.seconds($0.model) } ?? "—")
             row("display raster", stats.latest.map { Self.seconds($0.raster) } ?? "—")
             row("cost per frame", stats.latest.map { Self.seconds($0.cost) } ?? "—")
             row("cost range", Self.range(stats.cheapest, stats.dearest))
-            row("frames dropped", "\(stats.dropped)")
-            row("passes completed", "\(stats.completed)")
+            row("frames dropped, session", "\(stats.dropped)")
+            row("passes completed, session", "\(stats.completed)")
             row("input frame", stats.latest.map { "\($0.width) × \($0.height)" } ?? "—")
             // A request, never a measurement. Below it is the one dispatch fact
             // that *is* knowable, and the answer to "why seconds a pass".
