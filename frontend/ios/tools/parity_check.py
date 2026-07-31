@@ -37,9 +37,17 @@ visibility-weighted centre and a masked min/spread over all 18 keypoints, so ONE
 channel perturbs 76 of the 130 stage-3 features. An input whose keypoints did not fully
 agree cannot grade the classifier and is excluded -- but a run where too few inputs are
 gradeable FAILS as vacuous rather than reporting a green pass.
-"""
+
+The two comparison ResNet-18s get one table each plus a shared **contract traps** table. Being plain
+fp16 convolution stacks their own tables are ordinary tolerance gates; the traps table is the
+interesting one, because what differs between the three shipped models is not numerics but
+*contracts* -- mixing those up yields a plausible wrong answer, not a crash. It gates the two that
+exist today: the ResNets emit LOGITS while the 3-stage model already softmaxed, and
+``resnet18_pose_256`` orders its classes ``forehand=0, backhand=1`` against the other two's
+alphabetical ``backhand=0, forehand=1``."""
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -56,6 +64,7 @@ if str(TOOLS_DIR) not in sys.path:
 # wrong reference. Importing it also puts REPO_ROOT on sys.path.
 from export_coreml import (  # noqa: E402
     DROPOUT, VISIBILITY_THRESHOLD, PoseNet, find_repo_root, square_size)
+from export_comparison import SPECS, Normalized, build  # noqa: E402
 
 REPO_ROOT = find_repo_root(Path(__file__).resolve())
 
@@ -128,6 +137,30 @@ MIN_GRADEABLE_FRACTION = 0.15
 # Cycled through in end-to-end mode; non-square and both orientations so the letterbox
 # padding is exercised on each axis.
 FRAME_SIZES = ((640, 360), (720, 1280), (512, 512), (960, 540))
+
+# --- comparison ResNet-18 gates --------------------------------------------------
+# Calibrated separately and the same way, over 20 seeds x 8 inputs x {cpu, all} x 2 models = 640
+# comparisons: max|dlogit| 6.32e-03, max|dprob| 2.04e-03 (1.78e-03 over gradeable inputs),
+# gradeable 50-54%, and ZERO argmax flips on any of the 640 -- not just on the gradeable ones.
+# These are far simpler to gate than the fused graph (one fp16 convolution stack, no argmax to
+# relocate, no clamp to overflow), and the margins below are deliberately fat: the lesson from the
+# stage-2 gates is that a gate tuned to the sweep false-fails on the seeds the sweep did not draw.
+RESNET_LOGIT_TOL = 3e-2      # 4.7x the measured worst
+RESNET_PROB_TOL = 1e-2       # 4.9x, and 1/30 of the tie gap below
+# Same role as CLASS_TIE_GAP: an input grades the argmax only when torch's own top-2 gap is wide
+# enough that RESNET_PROB_TOL of drift on each of the two cannot swap them -- 2e-2 vs 3e-1 here, so
+# "gradeable inputs never flip" holds arithmetically and any flip is a real defect.
+RESNET_TIE_GAP = 3e-1
+RESNET_MIN_GRADEABLE_FRACTION = 0.15   # measured 50-54%; the floor only catches a vacuous run
+# --- contract traps --------------------------------------------------------------
+# The cheapest possible guard against a double softmax: a probability vector sums to exactly 1, a
+# logit vector has no reason to, and gating on the MINIMUM |sum - 1| over every input and both
+# stacks means one vector that happens to land near 1 cannot carry the run. Measured 1.132.
+LOGIT_SUM_MARGIN = 5e-1
+PROB_SUM_TOL = 1e-4      # the 3-stage softmax output, the other side of the same trap
+# Predictions the wrong model's label list would rename: above 0 proves the two orders are not
+# interchangeable, 0 means the run proved nothing. Measured 126/320 in the sweep.
+MIN_ORDER_SENSITIVE = 1
 
 
 # --- synthetic inputs ------------------------------------------------------------
@@ -271,6 +304,106 @@ class CoreML:
         return probs, kps
 
 
+def softmax(logits: np.ndarray) -> np.ndarray:
+    shifted = np.exp(logits - logits.max())
+    return shifted / shifted.sum()
+
+
+class ResNet:
+    """One comparison ResNet-18: both stacks and the running worst cases, driven by its registry
+    entry. The torch side is rebuilt by ``export_comparison.build`` -- the code that produced the
+    package -- for the same reason ``PoseNet`` is imported rather than re-implemented. Input size,
+    label order and output name come from the registry, so a registry that drifts from the exporter
+    fails this harness instead of the app."""
+
+    def __init__(self, entry: dict, models_dir: Path, compute_units: str):
+        import coremltools as ct
+
+        spec = next((s for s in SPECS if s["id"] == entry["id"]), None)
+        if spec is None or list(spec["labels"]) != list(entry["labels"]):
+            raise SystemExit(f"registry entry '{entry['id']}' does not match any model "
+                             "export_comparison.py builds -- one of the two is stale")
+        self.id, self.size, self.labels = entry["id"], entry["input"]["size"], entry["labels"]
+        self.output = entry["output"]["name"]
+        self.torch = Normalized(build(spec, REPO_ROOT / spec["checkpoint"])).eval()
+        units = ct.ComputeUnit.CPU_ONLY if compute_units == "cpu" else ct.ComputeUnit.ALL
+        self.coreml = ct.models.MLModel(str(models_dir / entry["packages"][0]), compute_units=units)
+        self.inputs = self.gradeable = self.agree = self.order_sensitive = 0
+        self.logit = self.prob = 0.0
+        self.sum_dev, self.min_logit, self.predicted = np.inf, np.inf, {}
+
+    @torch.no_grad()
+    def add(self, label: str, crop: Image.Image, shared_labels, verbose: bool):
+        # Same pixels both sides: Core ML takes the PIL image, torch the same 0-255 array,
+        # because the normalization is inside both graphs rather than in the caller.
+        raw = torch.from_numpy(np.array(crop)).permute(2, 0, 1).unsqueeze(0).float()
+        ref = self.torch(raw).squeeze(0).numpy().astype(np.float64)
+        ml = np.asarray(self.coreml.predict({"image": crop})[self.output], np.float64).reshape(-1)
+        self.inputs += 1
+        # No separate NaN row here, unlike the 3-stage tables: a non-finite logit on either side
+        # makes this max NaN, and `NaN < tol` is False, so the very next gate fails.
+        self.logit = max(self.logit, float(np.max(np.abs(ref - ml))))
+        # Both sides: neither a torch-side nor a Core ML-side logit vector may sum to 1.
+        self.sum_dev = min(self.sum_dev, abs(float(ref.sum()) - 1.0), abs(float(ml.sum()) - 1.0))
+        self.min_logit = min(self.min_logit, float(ref.min()), float(ml.min()))
+
+        ref_probs, ml_probs = softmax(ref), softmax(ml)
+        delta = float(np.max(np.abs(ref_probs - ml_probs)))
+        ref_class, ml_class = int(np.argmax(ref)), int(np.argmax(ml))
+        gradeable = float(np.diff(np.sort(ref_probs)[-2:])[0]) > RESNET_TIE_GAP
+        if gradeable:
+            self.gradeable += 1
+            self.prob = max(self.prob, delta)
+            self.agree += int(ref_class == ml_class)
+        # The label trap, measured on real predictions rather than asserted about the lists:
+        # this model's own order names the winning index one thing, the alphabetical order the
+        # other two share names it another. A single shared label list would ship that.
+        name = self.labels[ref_class]
+        self.predicted[name] = self.predicted.get(name, 0) + 1
+        self.order_sensitive += int(name != shared_labels[ref_class])
+        if verbose:
+            print(f"    {self.id} {label}  |dprob| {delta:.2e}  class {ref_class}/{ml_class}"
+                  f" = {name}  {'gradeable' if gradeable else 'ungraded'}")
+
+    def rows(self) -> list:
+        floor = int(np.ceil(RESNET_MIN_GRADEABLE_FRACTION * self.inputs))
+        return [
+            Row("logits max|d| (fp16 conversion)", f"{self.logit:.3e}",
+                f"< {RESNET_LOGIT_TOL:g}", self.logit < RESNET_LOGIT_TOL),
+            Row("class probability max|d|, gradeable", f"{self.prob:.3e}",
+                f"< {RESNET_PROB_TOL:g}", self.gradeable > 0 and self.prob < RESNET_PROB_TOL),
+            Row("class argmax, gradeable inputs", f"{self.agree}/{self.gradeable}",
+                f"{self.gradeable}/{self.gradeable}",
+                self.gradeable > 0 and self.agree == self.gradeable),
+            Row("gradeable inputs (torch top-2 gap)", f"{self.gradeable}/{self.inputs}",
+                f">= {floor}", self.gradeable >= max(floor, 1)),
+            Row("torch predictions, OWN label order",
+                ", ".join(f"{n} x{c}" for n, c in sorted(self.predicted.items())) or "-", "-"),
+        ]
+
+
+def trap_rows(resnets, shared, prob_sum_dev: float) -> list:
+    """The contract traps: two output conventions and two class orders, in one table."""
+    odd = next((r for r in resnets if list(r.labels) != list(shared)), None)
+    order = odd.labels if odd else shared
+    sensitive, total = (sum(r.order_sensitive for r in resnets), sum(r.inputs for r in resnets))
+    sum_dev, min_logit = min(r.sum_dev for r in resnets), min(r.min_logit for r in resnets)
+    return [
+        Row(f"class order 0/1: {odd.id if odd else 'none'}",
+            f"{order[0]},{order[1]} vs {shared[0]},{shared[1]}", "swapped",
+            odd is not None and list(order[:2]) == [shared[1], shared[0]]),
+        Row("class orders agree from index 2 on", ",".join(order[2:]), "same both",
+            list(order[2:]) == list(shared[2:])),
+        Row("predictions the wrong list would rename", f"{sensitive}/{total} inputs",
+            f">= {MIN_ORDER_SENSITIVE}", sensitive >= MIN_ORDER_SENSITIVE),
+        Row("ResNet is LOGITS: min |sum - 1|", f"{sum_dev:.3f}",
+            f">= {LOGIT_SUM_MARGIN:g}", sum_dev >= LOGIT_SUM_MARGIN),
+        Row("ResNet is LOGITS: min value seen", f"{min_logit:.3f}", "< 0", min_logit < 0),
+        Row("3-stage is PROBABILITIES: max |sum - 1|", f"{prob_sum_dev:.2e}",
+            f"< {PROB_SUM_TOL:g}", prob_sum_dev < PROB_SUM_TOL),
+    ]
+
+
 # --- prominence ------------------------------------------------------------------
 def flat_index(kps: np.ndarray, size: int) -> np.ndarray:
     """Rebuild the flat heatmap argmax index the decode produced from its x,y output."""
@@ -337,7 +470,7 @@ class Stats:
         self.inputs = 0
         self.identical = Peaks()
         self.split = Peaks()
-        self.prob = self.bbox = 0.0
+        self.prob = self.bbox = self.prob_sum_dev = 0.0
         self.gradeable = self.class_agree = 0
         self.rect_equal = self.rect_total = 0
         self.nonfinite = []
@@ -374,6 +507,9 @@ class Stats:
         gradeable = (same_pixels and not relocated.any()
                      and (ordered[-1] - ordered[-2]) > CLASS_TIE_GAP)
         prob_delta = float(np.max(np.abs(ref_probs - ml_probs)))
+        # Half of the logits-vs-probabilities trap: stage 3 softmaxed, so this sums to 1.
+        self.prob_sum_dev = max(self.prob_sum_dev, abs(float(ref_probs.sum()) - 1.0),
+                                abs(float(ml_probs.sum()) - 1.0))
         ref_class, ml_class = int(np.argmax(ref_probs)), int(np.argmax(ml_probs))
         if gradeable:
             self.gradeable += 1
@@ -517,27 +653,45 @@ def main() -> int:
     models_dir = args.models_dir.expanduser().resolve()
     if not checkpoint.is_file():
         raise SystemExit(f"checkpoint not found: {checkpoint}")
-    for name in ("TPDBBox.mlpackage", "TPDPoseNet.mlpackage"):
-        if not (models_dir / name).exists():
-            raise SystemExit(f"missing {models_dir / name} -- run `make export` from frontend/ios")
+    registry_path = models_dir / "TPDModelRegistry.json"
+    if not registry_path.is_file():
+        raise SystemExit(f"missing {registry_path} -- run `make export` from frontend/ios")
+    registry = json.loads(registry_path.read_text())
+    missing = [n for e in registry["models"] for n in e["packages"] if not (models_dir / n).exists()]
+    if missing:
+        raise SystemExit(f"missing {missing} in {models_dir} -- run `make export` from frontend/ios")
 
     print(f"repo root   {REPO_ROOT}\ncheckpoint  {checkpoint}\nmodels dir  {models_dir}")
     reference = Reference(checkpoint)
     coreml = CoreML(models_dir, args.compute_units)
+    pipeline = next(e for e in registry["models"] if e["kind"] == "pipeline")
+    resnets = [ResNet(e, models_dir, args.compute_units)
+               for e in registry["models"] if e["kind"] == "classifier"]
+    if not resnets:
+        raise SystemExit("registry lists no classifier models -- nothing to compare")
     seeds = list(range(args.seed, args.seed + args.num_seeds))
     print(f"models      {reference.bbox_size}px bbox, {reference.kp_size}px keypoint, "
           f"{reference.num_keypoints} keypoints, {reference.num_classes} classes "
           f"{reference.labels}")
+    print("comparison  " + ", ".join(f"{r.id} @{r.size}px" for r in resnets))
     print(f"inputs      {args.num_inputs} per seed per mode, seeds {seeds}, "
           f"compute units {coreml.units}")
 
     same, e2e = Stats(), Stats()
+    biggest = max(r.size for r in resnets)
     for position, seed in enumerate(seeds):
         rng = np.random.default_rng(seed)
         crops = make_crops(rng, reference.kp_size, args.num_inputs, probes=position == 0)
         frames = make_frames(rng, args.num_inputs)
         run_same_crop(reference, coreml, crops, f"same s{seed}", same, args.verbose)
         run_end_to_end(reference, coreml, frames, f"e2e  s{seed}", e2e, args.verbose)
+        # One scene per input, resampled per model, so "a fixed input through both ResNets"
+        # is literally the same picture and the label trap compares like with like.
+        for index, big in enumerate(make_crops(rng, biggest, args.num_inputs, position == 0)):
+            for resnet in resnets:
+                crop = big if resnet.size == biggest else big.resize(
+                    (resnet.size,) * 2, Image.Resampling.BILINEAR)
+                resnet.add(f"s{seed}:{index}", crop, pipeline["labels"], args.verbose)
 
     torch_sum, coreml_sum, (ref_class, ml_class) = same.probe
     rows = pose_rows(same, split_rows=False)
@@ -560,6 +714,21 @@ def main() -> int:
         f"END-TO-END  frame -> bbox -> crop -> stages 2+3  ({e2e.inputs} inputs)",
         "gated over the identical-rect frames only; [info] rows are the rounding's own noise",
         e2e_rows,
+    ) and ok
+
+    for resnet in resnets:
+        entry = next(e for e in registry["models"] if e["id"] == resnet.id)
+        ok = print_table(
+            f"{resnet.id.upper()}  {resnet.size}px RGB -> {entry['output']['type']} "
+            f"({resnet.inputs} inputs)",
+            f"{entry['displayName']}; order {entry['labels']} from {entry['labelOrderSource']}",
+            resnet.rows(),
+        ) and ok
+
+    ok = print_table(
+        "CONTRACT TRAPS  what the client cannot be allowed to guess",
+        "two output conventions and two class orders across the three shipped models",
+        trap_rows(resnets, pipeline["labels"], same.prob_sum_dev),
     ) and ok
 
     print("\nPARITY OK" if ok else "\nPARITY FAILED")

@@ -1,6 +1,8 @@
 # iOS model export tooling
 
-Converts the trained end-to-end checkpoint into the Core ML packages the iOS app loads.
+Converts the trained checkpoints into the Core ML packages the iOS app loads: the 3-stage
+end-to-end model (`export_coreml.py`) and the two comparison ResNet-18s (`export_comparison.py`).
+`make export` runs both; `make parity` gates all three.
 
 ## Run it
 
@@ -56,6 +58,47 @@ Stage 1 stays a separate package because the crop between stages depends on stag
 cannot be expressed with static shapes. If the fused stage 2+3 conversion ever fails, the script
 prints the reason, writes no `TPDPoseNet.mlpackage`, and exits non-zero pointing at the 3-model
 fallback in `frontend/IOS_IMPLEMENTATION_PLAN.md` §3 — it never emits a broken package.
+
+## The comparison ResNet-18s
+
+`export_comparison.py` emits `TPDResNetKaggle160.mlpackage` (`image` 160×160 RGB **0-255** →
+`logits` (1,4), 21.3 MB), `TPDResNetPose256.mlpackage` (same at 256×256, 21.3 MB) and
+`TPDModelRegistry.json`, which describes all three shipped models. Both checkpoints are
+torchvision-shaped ResNet-18s — 122 state-dict keys, identical to
+`torchvision.models.resnet18(num_classes=4)` — so **timm is not a dependency**. They differ only in
+key prefix and head: `tennis_timm_resnet18_160_best.pth` is unprefixed with a plain `fc`;
+`Resnet_Model/best_model.pt` prefixes every key `model.` and its head is a `Sequential` whose
+`fc.1` is the `Linear`. Both load with **`strict=True`** — a renamed layer must fail the export,
+not load randomly initialised and ship confident garbage. `Resnet_Model`'s own
+`models/pose_classification.py` (an 8-layer plain CNN), `train/train_classification.py` and
+`inference/pose_infer.py` do **not** describe `best_model.pt`; no checkpoint in this repo matches
+that architecture, so the weights are authoritative and that source is stale.
+
+**Two contracts the client must not guess.** (1) Both ResNets return **raw logits**
+(`CrossEntropyLoss`), while the 3-stage `PoseClassificationModel.forward` already softmaxes and
+returns **probabilities** — softmaxing the wrong one is silent, not a crash. (2)
+`Resnet_Model/data/pose_dataset.py` hardcodes `forehand=0, backhand=1`; the Kaggle and 3-stage
+models use the alphabetical `backhand=0, forehand=1`, so indices 0 and 1 mean **opposite** things
+across the two ResNets. Both are recorded per model in the registry (`output.type`, `labels`,
+`labelOrderSource`) and gated by the CONTRACT TRAPS table in `make parity`. The orders come from
+each model's own training source; **no dataset is checked in, so neither has been confirmed against
+real images** — that still needs one on-device check with a known forehand.
+
+`TPDModelSpec.json` and `TPDLabels.json` are untouched and keep working — they remain the truth for
+the 3-stage model, and the registry *reads* them rather than restating them. The registry is purely
+additive: one array of self-describing entries (`id`, `displayName`, `kind`, `packages`, `input`,
+`output`, `labels`, `labelOrderSource`, `precision`, `minimumDeploymentTarget`, `source`), so a
+fourth model is an entry, not a Swift change — reshaping a format Swift already parses would have
+bought nothing.
+
+**Normalization is baked in.** ImageNet `(x/255 − mean)/std` collapses to a per-channel
+`x * scale + bias` → `scale 0.0171247538 0.0175070028 0.0174291939`,
+`bias −2.11790393 −2.03571429 −1.80444444`. Those cannot live on `ct.ImageType` — its `scale` is a
+scalar, see `Normalized` in `export_comparison.py` for the measured failure — so the packages take
+plain 0-255 RGB and the affine is the graph's first op; same guarantee for the client, which hands
+over an image and cannot get the normalization wrong. The exporter measures the result against the
+real `torchvision.transforms` eval pipeline instead of trusting the algebra (`max|Δ|` 1.5e-07
+Kaggle, 6.6e-07 pose) and refuses to write a package above 1e-4.
 
 ## Why the pins are so low
 
