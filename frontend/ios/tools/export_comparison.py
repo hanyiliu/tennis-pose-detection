@@ -5,12 +5,10 @@
     TPDResNetPose256.mlpackage     image (1,3,256,256) 0-255 RGB -> logits (1,4)
     TPDModelRegistry.json          all three shipped models, each self-describing
 
-Both checkpoints are torchvision-shaped ResNet-18s (122 state-dict keys), so one builder hosts both
-and ``timm`` is never needed. Three things differ per model, none may be guessed, each is silent
-when wrong: output convention (logits here, already-softmaxed there), class order, and how well that
-order is KNOWN -- one of the three is a guess. All are registry fields; README.md has why. The two
-checkpoints' own training/inference sources describe an 8-layer CNN, not these weights, and are
-stale: the state dicts are authoritative."""
+Both checkpoints are torchvision-shaped ResNet-18s (122 state-dict keys), so one builder hosts both and
+``timm`` is never needed. Three per-model facts may not be guessed, each silent when wrong: output
+convention, class order, and how well that order is KNOWN. All are registry fields; README.md has why.
+Their own training/inference sources describe an 8-layer CNN, not these weights: the state dicts win."""
 
 import argparse
 import json
@@ -38,9 +36,9 @@ SCALE = tuple(1.0 / (255.0 * s) for s in IMAGENET_STD)
 BIAS = tuple(-m / s for m, s in zip(IMAGENET_MEAN, IMAGENET_STD))
 
 # All that differs between the two nets. `labels` is each model's OWN order; `label_order.status` is
-# how well it is known -- "derived" = read off whatever assigns the indices, "assumed" = plausible,
-# unsupported by the training code, unconfirmed here. Shipping them as equally known is a lie the
-# client cannot see through, so it surfaces "assumed" instead; promoting one is a word here.
+# how well it is known -- "derived" = read off whatever assigns the indices, "assumed" = plausible but
+# unsupported and unconfirmed. Shipping both as equally known is a lie the client cannot see through,
+# so it surfaces "assumed" instead; promoting one is a word here, and parity asserts both.
 SPECS = (
     dict(id="resnet18_kaggle_160", package="TPDResNetKaggle160.mlpackage",
          display="ResNet-18 (Kaggle, 160px)", size=160, prefix="", head="linear",
@@ -60,9 +58,9 @@ SPECS = (
 
 
 class Normalized(nn.Module):
-    """Raw 0-255 RGB in, logits out. The transform is the graph's first op because ``ct.ImageType``
-    cannot carry it: ``bias`` is per channel but ``scale`` is a SCALAR, so a length-3 array
-    broadcasts on the LAST axis -- coremltools 8.3.0: "Incompatible dim 3 ... vs. (1,1,1,3)"."""
+    """Raw 0-255 RGB in, logits out. The transform is the graph's first op: ``ct.ImageType``'s ``bias``
+    is per channel but its ``scale`` is a SCALAR, so a length-3 array broadcasts on the LAST axis --
+    coremltools 8.3.0: "Incompatible dim 3 ... vs. (1,1,1,3)"."""
 
     def __init__(self, body: nn.Module):
         super().__init__()
@@ -147,8 +145,7 @@ def pipeline_entry(models_dir: Path) -> dict:
     return {
         "id": "tpd_3stage", "displayName": "TPD 3-stage (bbox + keypoints + pose)",
         "kind": "pipeline", "packages": [spec["bboxModel"], spec["poseModel"]],
-        # Not a placeholder: under `(x/255 - mean)/std`, the one formula these fields carry, the
-        # identity pair IS this pipeline's ToTensor()-only preprocessing, and parity asserts it.
+        # Not a placeholder: the identity pair IS ct.ImageType(scale=1/255); parity reads it back.
         "input": {"name": "image", "size": spec["bboxInputSize"], "mean": [0.0] * 3,
                   "std": [1.0] * 3, "normalizationBakedIn": True},
         # forward() already applies softmax -- iOS must NOT softmax this one.
@@ -173,9 +170,9 @@ def main() -> int:
 
     out_dir, label, target = args.out_dir.expanduser().resolve(), args.precision, deployment_target(ct)
     precision = ct.precision.FLOAT32 if label == "fp32" else ct.precision.FLOAT16
-    print(f"out dir     {out_dir}\ncoremltools {ct.__version__} / torch {torch.__version__}"
-          f" / torchvision {torchvision.__version__}\nprecision   {label}, target iOS17"
-          f"\nbaked-in    (x/255 - {list(IMAGENET_MEAN)}) / {list(IMAGENET_STD)}  =  x * "
+    print(f"out dir     {out_dir}\ncoremltools {ct.__version__} / torch {torch.__version__} /"
+          f" torchvision {torchvision.__version__}\nprecision   {label}, target iOS17\nbaked-in"
+          f"    (x/255 - {list(IMAGENET_MEAN)}) / {list(IMAGENET_STD)}  =  x * "
           + ",".join(f"{v:.10f}" for v in SCALE) + " + " + ",".join(f"{v:+.8f}" for v in BIAS))
 
     built = []
