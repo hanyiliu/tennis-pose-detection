@@ -36,6 +36,19 @@ struct LiveCameraView: View {
                 controls
             }
         }
+        // Top-leading, inside the safe area; the bottom belongs to the controls.
+        // The height cap is load-bearing: it makes the expanded panel scroll rather
+        // than run off screen, and stops its material short of `controls`, which at
+        // an accessibility size it would else cover and eat every tap aimed at. A
+        // bare `.frame` hit-tests nothing, so the space it reserves stays preview.
+        .overlay(alignment: .topLeading) {
+            DiagnosticsHUD(stats: model.performance, computeUnits: model.computeUnits)
+                .padding(.horizontal, 14)
+                .padding(.top, 6)
+                .containerRelativeFrame(.vertical, alignment: .top) { height, _ in
+                    max(160, height - Self.controlsClearance)
+                }
+        }
         .preferredColorScheme(.dark)
         // Cancelled on disappear; the loop's `defer` stops the source with it.
         // Keyed on `runKey`, whose `attempt` half is the recovery token: `run()`
@@ -53,6 +66,10 @@ struct LiveCameraView: View {
             if phase == .active, model.failure != nil { model.retry() }
         }
     }
+
+    /// `controls` is 46 pt of chip plus 12 pt of padding either side, and the
+    /// chips are fixed-size, so this does not move with Dynamic Type either.
+    private static let controlsClearance: CGFloat = 96
 
     private var controls: some View {
         HStack(alignment: .center, spacing: 10) {

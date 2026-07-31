@@ -3,6 +3,7 @@
 
 import CoreGraphics
 import CoreImage
+import CoreML
 import Foundation
 import Observation
 import SwiftUI
@@ -40,6 +41,8 @@ actor InferenceWorker {
     /// isolation domain — so `CIContext()` would be constructed on main. Smaller
     /// than the model load, same trap.
     private var display: CIContext?
+    /// Read back by the HUD, from the configuration actually handed to the engine.
+    private(set) var computeUnits: MLComputeUnits?
 
     /// Loads both Core ML models, off the main actor. Idempotent, so a caller
     /// re-entering the loop after a failure retries the load rather than
@@ -47,7 +50,9 @@ actor InferenceWorker {
     func load() throws {
         if display == nil { display = CIContext() }
         guard engine == nil else { return }
-        engine = try TPDInferenceEngine()
+        let configuration = MLModelConfiguration()
+        engine = try TPDInferenceEngine(configuration: configuration)
+        computeUnits = configuration.computeUnits
         // Cheap standing proof: if the load ever migrates back into `init` this
         // prints YES, which is otherwise visible only in a profile.
         #if DEBUG
@@ -55,17 +60,33 @@ actor InferenceWorker {
         #endif
     }
 
-    /// One frame, start to finish. Returns `nil` only if the display raster fails,
-    /// which is a dropped frame rather than an error worth surfacing.
-    func process(_ frame: VideoFrame) throws -> RenderedFrame? {
+    /// One frame, start to finish, plus what it cost. Returns `nil` only if the
+    /// display raster fails, which is a dropped frame rather than an error worth
+    /// surfacing. The stamps are `ContinuousClock` reads — monotonic, so a clock
+    /// adjustment cannot produce a negative stage, which `Date` can — and the last
+    /// travels out in the `Sample`, because the meter needs the *instants* of
+    /// consecutive passes to see the idle between them, not only their lengths.
+    func process(_ frame: VideoFrame) throws -> (frame: RenderedFrame,
+                                                 cost: PerformanceMeter.Sample)? {
         // Cheap after the first call, and it keeps the engine's existence an
         // invariant of this method rather than of the caller's call order.
         try load()
         guard let engine, let display else { return nil }
         let image = CIImage(cvPixelBuffer: frame.pixelBuffer)
+        let started = ContinuousClock.now
         let result = try engine.predict(frame: image)
+        let predicted = ContinuousClock.now
         guard let raster = display.createCGImage(image, from: image.extent) else { return nil }
-        return RenderedFrame(image: raster, result: result)
+        let rasterized = ContinuousClock.now
+        // Dimensions come from the same `image` the timings were taken over, so
+        // the panel cannot print one frame's size beside another frame's cost.
+        let cost = PerformanceMeter.Sample(
+            model: started.duration(to: predicted).inSeconds,
+            raster: predicted.duration(to: rasterized).inSeconds,
+            finished: rasterized,
+            width: Int(image.extent.width.rounded()),
+            height: Int(image.extent.height.rounded()))
+        return (RenderedFrame(image: raster, result: result), cost)
     }
 }
 
@@ -88,6 +109,15 @@ final class LiveViewModel {
     /// back from Settings finds the loop already gone.
     private(set) var attempt = 0
     var overlay = OverlayOptions()
+    /// What the HUD draws. Assigned once per completed pass — the only moment
+    /// `frame` changes too — so it costs no redraw of its own.
+    private(set) var performance = PerformanceMeter.Snapshot()
+    private(set) var computeUnits: MLComputeUnits?
+
+    /// `@ObservationIgnored` because `drop()` fires at capture rate, up to 60 Hz,
+    /// and no view reads it — they read `performance`. Registering a mutation that
+    /// often is main-actor time a diagnostic must not take from what it watches.
+    @ObservationIgnored private var meter = PerformanceMeter()
 
     /// Held rather than made per run, so a retry re-uses models already loaded
     /// and only re-attempts the load if it was the thing that failed.
@@ -122,6 +152,7 @@ final class LiveViewModel {
             failure = Self.failure(for: error)
             return
         }
+        computeUnits = await worker.computeUnits
         let stream: FrameStream
         do {
             stream = try await source.start()
@@ -131,14 +162,16 @@ final class LiveViewModel {
         }
         failure = nil
         for await video in stream {
-            guard !isInferring else { continue }
+            // Counted where it happens: one increment on a branch that already
+            // existed, and the only honest place to see capture outrun inference.
+            guard !isInferring else { meter.drop(); continue }
             isInferring = true
             // Inherits this actor, so it resumes on main to publish — but the
             // await below hops to `worker`, and that is where inference runs.
             Task { [weak self, worker] in
                 do {
-                    let rendered = try await worker.process(video)
-                    self?.finish(rendered, nil)
+                    let done = try await worker.process(video)
+                    self?.finish(done, nil)
                 } catch {
                     self?.finish(nil, error)
                 }
@@ -154,9 +187,12 @@ final class LiveViewModel {
         attempt += 1
     }
 
-    private func finish(_ rendered: RenderedFrame?, _ error: Error?) {
-        if let rendered {
-            frame = rendered
+    private func finish(_ done: (frame: RenderedFrame, cost: PerformanceMeter.Sample)?,
+                        _ error: Error?) {
+        if let done {
+            frame = done.frame
+            meter.record(done.cost)
+            performance = meter.snapshot
             failure = nil
         } else if let error, frame == nil {
             // Only worth showing while there is nothing else on screen; a
