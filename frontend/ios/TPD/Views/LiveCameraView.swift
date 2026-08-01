@@ -70,8 +70,10 @@ struct LiveCameraView: View {
         }
     }
 
-    /// `controls` plus the model strip and its notes, all fixed-size; the HUD panel scrolls.
-    private static let controlsClearance: CGFloat = 200
+    /// `controls` is 46 pt of chip plus 12 pt either side at fixed point sizes, and `ModelPicker`
+    /// scrolls its notes rather than grow past `maxHeight`, so one constant clears both. 200 did
+    /// not: the bottom stack measured ~222 pt at default size once two captions showed.
+    private static let controlsClearance: CGFloat = ModelPicker.maxHeight + 10 + 70
 
     private var controls: some View {
         HStack(alignment: .center, spacing: 10) {

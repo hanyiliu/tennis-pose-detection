@@ -20,9 +20,8 @@ final class ModelRegistryTests: XCTestCase {
             let broken = good.replacingOccurrences(of: find, with: replace)
             XCTAssertNotEqual(broken, good, "\(name): the fixture no longer contains '\(find)'")
             XCTAssertThrowsError(try ModelRegistry.decode(Data(broken.utf8)), name) { error in
-                let described = (error as? TPDInferenceError)?.errorDescription ?? "\(error)"
-                XCTAssertTrue(described.contains("TPDModelRegistry.json"), "\(name): \(described)")
-                XCTAssertGreaterThan(described.count, 40, "\(name): \(described)")
+                let said = (error as? TPDInferenceError)?.errorDescription ?? "\(error)"
+                XCTAssertTrue(said.contains("TPDModelRegistry.json") && said.count > 40, "\(name): \(said)")
             }
         }
         XCTAssertThrowsError(try ModelRegistry.decode(Data("{\"models\": []}".utf8)))
@@ -43,7 +42,7 @@ final class ModelRegistryTests: XCTestCase {
     }
 
     /// **The one that matters.** The pose-split ResNet puts forehand at index 0 where the others
-    /// put backhand, so one vector decoded through both must come back under two names: a shared
+    /// put backhand, so one vector decoded through both must come back under two names — a shared
     /// list would agree here and be wrong on screen. Then the honest "no geometry".
     func testTheSameVectorDecodesToDifferentNamesUnderDifferentLabelOrders() throws {
         let classifiers = try ModelRegistry.load(from: bundle).models.filter { $0.kind == .classifier }
@@ -53,19 +52,16 @@ final class ModelRegistryTests: XCTestCase {
         let logits: [Float] = [9, 1, 0, -1]  // peaks at the index the two entries name apart
         let left = try first.result(from: logits, frameSize: CGSize(width: 8, height: 6))
         let right = try second.result(from: logits, frameSize: .zero)
-        XCTAssertEqual(left.bestIndex, 0)
-        XCTAssertEqual(right.bestIndex, 0)
+        XCTAssertEqual([left.bestIndex, right.bestIndex], [0, 0])
         XCTAssertEqual(left.confidence, right.confidence, accuracy: 1e-6)
         XCTAssertNotEqual(left.label, right.label,
                           "both models named index 0 '\(left.label)' — the decode is using one "
                               + "shared label list, not each entry's own")
         XCTAssertEqual(Set([left.label, right.label]), ["backhand", "forehand"])
-        XCTAssertNil(left.bbox)
-        XCTAssertTrue(left.keypoints.isEmpty)
+        XCTAssertNil(left.bbox); XCTAssertTrue(left.keypoints.isEmpty)
         let geometry = OverlayGeometry(result: left, options: OverlayOptions(),
                                        size: CGSize(width: 300, height: 200))
-        XCTAssertNil(geometry.box, "a classifier must not draw a rectangle it never predicted")
-        XCTAssertTrue(geometry.dots.isEmpty)
+        XCTAssertTrue(geometry.box == nil && geometry.dots.isEmpty, "a classifier drew geometry")
         let pill = try XCTUnwrap(geometry.pill).rect  // centred, not at an absent rect's origin
         XCTAssertEqual(pill.midY, 100, accuracy: 0.5)
     }

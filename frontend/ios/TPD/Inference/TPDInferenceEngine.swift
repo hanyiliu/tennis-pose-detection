@@ -30,17 +30,15 @@ final class TPDInferenceEngine: TPDEngine {
         self.entry = entry
         spec = try TPDModelSpec.load(from: bundle, resource: entry.specResource)
         labels = entry.labels
-        guard labels.count == spec.numClasses else {
-            throw ModelRegistry.malformed(
-                "'\(entry.id)': \(labels.count) labels for a \(spec.numClasses)-class head")
-        }
-        bboxModel = try EngineIO.loadModel(spec.bboxModelResource, bundle, configuration)
-        poseModel = try EngineIO.loadModel(spec.poseModelResource, bundle, configuration)
+        guard labels.count == spec.numClasses else { throw ModelRegistry.malformed(
+            "'\(entry.id)': \(labels.count) labels for a \(spec.numClasses)-class head") }
+        bboxModel = try Self.loadModel(spec.bboxModelResource, bundle, configuration)
+        poseModel = try Self.loadModel(spec.poseModelResource, bundle, configuration)
         // Colour management off: the Python pipeline reads sRGB bytes and divides by 255 with
         // no profile conversion, so a CoreImage colourspace convert would shift every input.
         context = CIContext(options: [.workingColorSpace: NSNull(), .cacheIntermediates: false])
-        bboxBuffer = try EngineIO.makeBuffer(spec.bboxInputSize)
-        poseBuffer = try EngineIO.makeBuffer(spec.keypointInputSize)
+        bboxBuffer = try Self.makeBuffer(spec.bboxInputSize)
+        poseBuffer = try Self.makeBuffer(spec.keypointInputSize)
     }
 
     func predict(frame: CIImage) throws -> TPDResult {
@@ -48,25 +46,22 @@ final class TPDInferenceEngine: TPDEngine {
         let frameWidth = Int(pixels.width), frameHeight = Int(pixels.height)
 
         // Stage 1 — the FULL frame squashed to a square, aspect ratio deliberately lost.
-        let full = EngineIO.bitmap(of: frame, CGRect(origin: .zero, size: pixels), context)
-        EngineIO.write(TPDResample.resized(full, to: spec.bboxInputSize, spec.bboxInputSize,
-                                           TPDResample.bilinear), into: bboxBuffer)
-        let raw = try EngineIO.floats(from: try run(bboxModel, on: bboxBuffer),
-                                      named: "bbox", count: 4)
+        let full = bitmap(of: frame, CGRect(origin: .zero, size: pixels), context)
+        write(TPDResample.resized(full, to: spec.bboxInputSize, spec.bboxInputSize,
+                                  TPDResample.bilinear), into: bboxBuffer)
+        let raw = try floats(from: try run(bboxModel, on: bboxBuffer), named: "bbox", count: 4)
         let bbox = LetterboxMath.normBBoxToPixels(
             x: Double(raw[0]), y: Double(raw[1]), width: Double(raw[2]), height: Double(raw[3]),
             frameWidth: frameWidth, frameHeight: frameHeight)
 
         // Stages 2+3 — crop the ORIGINAL frame (never the squashed one) and letterbox it.
-        EngineIO.write(TPDResample.letterboxed(EngineIO.bitmap(of: frame, bbox, context),
-                                               to: spec.keypointInputSize), into: poseBuffer)
+        write(TPDResample.letterboxed(bitmap(of: frame, bbox, context), to: spec.keypointInputSize),
+              into: poseBuffer)
         let pose = try run(poseModel, on: poseBuffer)
         // No softmax here, now enforced by `entry.result`: this entry's output.type is
         // `probabilities`, because forward() already applied one inside the exported graph.
-        let probabilities = try EngineIO.floats(from: pose, named: entry.output.name,
-                                                count: spec.numClasses)
-        let decoded = try EngineIO.floats(from: pose, named: "keypoints",
-                                          count: spec.numKeypoints * 3)
+        let probabilities = try floats(from: pose, named: entry.output.name, count: spec.numClasses)
+        let decoded = try floats(from: pose, named: "keypoints", count: spec.numKeypoints * 3)
 
         let size = spec.keypointInputSize
         var keypoints: [TPDKeypoint] = []
@@ -81,23 +76,17 @@ final class TPDInferenceEngine: TPDEngine {
             keypoints.append(TPDKeypoint(position: point, visibility: decoded[base + 2]))
         }
 
-        return try entry.result(from: probabilities, frameSize: pixels,
-                                bbox: bbox, keypoints: keypoints)
-    }
-
-    private func run(_ model: MLModel, on buffer: CVPixelBuffer) throws -> MLFeatureProvider {
-        try model.prediction(from: MLDictionaryFeatureProvider(
-            dictionary: [entry.input.name: MLFeatureValue(pixelBuffer: buffer)]))
+        return try entry.result(from: probabilities, frameSize: pixels, bbox: bbox, keypoints: keypoints)
     }
 }
 
-/// The plumbing, now shared with `ClassifierEngine`; left where it was private to the class.
-enum EngineIO {
+/// The pixel plumbing every engine gets: the same bodies, in the same file, with `private` traded
+/// for an extension so `ClassifierEngine` can call them too.
+extension TPDEngine {
     /// Rasterize `rect` — **top-left-origin pixels**, the space `normBBoxToPixels` returns —
     /// into a packed top-down BGRA bitmap. CoreImage's y axis points up, so the rect is flipped
     /// against the extent first; `colorSpace: nil` is the note in `init`.
-    static func bitmap(of image: CIImage, _ rect: CGRect,
-                       _ context: CIContext) -> TPDResample.Bitmap {
+    func bitmap(of image: CIImage, _ rect: CGRect, _ context: CIContext) -> TPDResample.Bitmap {
         let width = max(Int(rect.width), 1), height = max(Int(rect.height), 1)
         let bounds = CGRect(x: image.extent.minX + rect.minX, y: image.extent.maxY - rect.maxY,
                             width: CGFloat(width), height: CGFloat(height))
@@ -110,7 +99,7 @@ enum EngineIO {
     }
 
     /// Row by row: `CVPixelBufferGetBytesPerRow` is aligned padding, not always `width * 4`.
-    static func write(_ bitmap: TPDResample.Bitmap, into buffer: CVPixelBuffer) {
+    func write(_ bitmap: TPDResample.Bitmap, into buffer: CVPixelBuffer) {
         CVPixelBufferLockBaseAddress(buffer, [])
         defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
         guard let base = CVPixelBufferGetBaseAddress(buffer) else { return }
@@ -122,7 +111,12 @@ enum EngineIO {
         }
     }
 
-    static func floats(from provider: MLFeatureProvider, named name: String, count: Int) throws -> [Float] {
+    func run(_ model: MLModel, on buffer: CVPixelBuffer) throws -> MLFeatureProvider {
+        try model.prediction(from: MLDictionaryFeatureProvider(
+            dictionary: [entry.input.name: MLFeatureValue(pixelBuffer: buffer)]))
+    }
+
+    func floats(from provider: MLFeatureProvider, named name: String, count: Int) throws -> [Float] {
         guard let array = provider.featureValue(for: name)?.multiArrayValue else {
             throw TPDInferenceError.missingOutput(name)
         }
@@ -160,12 +154,5 @@ enum EngineIO {
             throw TPDInferenceError.pixelBufferAllocationFailed(code: status, size: size)
         }
         return buffer
-    }
-
-    static func softmax(_ raw: [Float]) -> [Float] {
-        guard let peak = raw.max() else { return [] }
-        let weights = raw.map { expf($0 - peak) }
-        let total = weights.reduce(0, +)
-        return total > 0 ? weights.map { $0 / total } : raw
     }
 }

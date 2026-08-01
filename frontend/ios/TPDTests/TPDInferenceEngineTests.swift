@@ -51,6 +51,21 @@ final class TPDInferenceEngineTests: XCTestCase {
         }
     }
 
+    /// `input.name`, `output.name` and `input.size` are only claims until a frame goes through
+    /// the compiled package: rename a feature in either export and it surfaces here rather than
+    /// on screen. Summing to 1 also pins the softmax `output.type: logits` asks for.
+    func testEachClassifierRunsAFrameThroughItsOwnPackage() throws {
+        let pixels = try frame(320, 240) { x, y in x > y ? 220 : 40 }
+        for entry in try ModelRegistry.load(from: bundle).models where entry.kind == .classifier {
+            let got = try ClassifierEngine(entry: entry, bundle: bundle).predict(pixelBuffer: pixels)
+            let saw = "\(entry.id) said \(got.label) from \(got.probabilities)"
+            XCTAssertEqual(got.probabilities.count, 4, saw)
+            XCTAssertTrue(got.probabilities.allSatisfy(\.isFinite), saw)
+            XCTAssertEqual(got.probabilities.reduce(0, +), 1, accuracy: 1e-4, saw)
+            XCTAssertTrue(entry.labels.contains(got.label), saw + " — not one of \(entry.labels)")
+        }
+    }
+
     // MARK: - predict
 
     /// Runs both stages on a synthetic 640x480 frame with a bright figure-shaped bar on grey,

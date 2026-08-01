@@ -94,12 +94,14 @@ struct DiagnosticsHUD: View {
             #endif
             row("active model", entry.map { "\($0.id) · \($0.kind.rawValue)" } ?? "loading…")
             if let entry {
-                row("input", "\(entry.input.size)² RGB 0–255"
-                    + (entry.input.normalizationBakedIn ? ", normalization in graph" : ""))
+                // Per stage: a pipeline's input is not one number — stages 2+3 run at 128².
+                row(entry.producesGeometry ? "stage 1 input" : "input", "\(entry.input.size)² RGB "
+                    + "0–255" + (entry.input.normalizationBakedIn ? ", normalization in graph" : ""))
                 row("output", "\(entry.output.name) as \(entry.output.type.rawValue)"
                     + (entry.output.type == .logits ? ", softmaxed here" : ", passed through"))
                 row("class order", "\(entry.labelOrder.status.rawValue) — "
                     + entry.labels.joined(separator: ", "))
+                row("weights", entry.provenance)
             }
         }
         .font(.caption2)

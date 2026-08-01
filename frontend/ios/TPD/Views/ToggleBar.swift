@@ -18,7 +18,7 @@ struct ToggleBar: View {
     @Binding var options: OverlayOptions
     /// False when the model predicts no geometry: a classifier has no box and no keypoints, so
     /// those two go dim and inert — a switch that changes nothing reads as a bug — and
-    /// `ModelPicker` says why. Defaults true: the still and video preview are the pipeline.
+    /// `ModelPicker` says why. True by default: the still and video previews are the pipeline.
     var geometry = true
 
     var body: some View {
@@ -27,8 +27,7 @@ struct ToggleBar: View {
                 chip("Box", "rectangle.dashed", $options.boundingBox)
                 chip("Points", "figure.tennis", $options.keypoints)
             }
-            .disabled(!geometry)
-            .opacity(geometry ? 1 : 0.3)
+            .disabled(!geometry).opacity(geometry ? 1 : 0.3)
             chip("Class", "tag.fill", $options.label)
             chip("Conf", "percent", $options.confidence)
         }

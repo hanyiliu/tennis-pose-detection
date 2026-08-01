@@ -58,9 +58,9 @@ struct OverlayGeometry: Equatable {
         // A classifier has no box to hang the caption off, and the top-left it would fall back
         // to is under the diagnostics pill. Centred: this reading is all such a model produces.
         guard let bounds else {
-            pill = Pill(rect: CGRect(x: (size.width - pillSize.width) / 2,
-                                     y: (size.height - pillSize.height) / 2, width: pillSize.width,
-                                     height: pillSize.height), text: caption, fontSize: style.fontSize)
+            pill = Pill(rect: CGRect(origin: CGPoint(x: (size.width - pillSize.width) / 2,
+                                                     y: (size.height - pillSize.height) / 2),
+                                     size: pillSize), text: caption, fontSize: style.fontSize)
             return
         }
         let x = min(max(margin, bounds.minX), max(margin, size.width - pillSize.width - margin))

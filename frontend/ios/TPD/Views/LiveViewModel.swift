@@ -112,7 +112,7 @@ final class LiveViewModel {
     private(set) var models: [TPDModelEntry] = []
     /// What the user chose, which is not yet what runs: `active` is the entry the worker really
     /// built, nil across the gap, so the HUD cannot name a model still loading. A broken registry
-    /// is held rather than thrown: there is no view to show it to until `run()`.
+    /// is held, not thrown — there is no view to show it to until `run()`.
     private(set) var selected: TPDModelEntry?
     private(set) var active: TPDModelEntry?
     private let registryFailure: Error?
@@ -126,9 +126,9 @@ final class LiveViewModel {
     /// and only re-attempts the load if it was the thing that failed.
     private let worker = InferenceWorker()
     private let source: any FrameSource
-    /// Which `run()` owns `source`. `.task(id:)` starts the replacement without
-    /// awaiting the cancelled run's teardown, so a stale `defer` could otherwise
-    /// call `stop()` *after* the new run's `start()` and silently kill it.
+    /// Which `run()` owns `source`, and which pass may still publish. A stale `defer` calling
+    /// `stop()` after the new run's `start()` kills it; `select()` bumps this too; and every
+    /// awaited step in `run()` re-reads it before writing anything shared or starting anything.
     private var generation = 0
     /// **The drop gate.** Capture runs at 30–60 fps and one three-stage pass does
     /// not. While this is true every arriving frame is discarded unread, so the
@@ -145,9 +145,11 @@ final class LiveViewModel {
         } catch { registryFailure = error }
     }
 
-    /// Switches models without leaving the live view. Bumping `attempt` does the work:
-    /// `.task(id:)` cancels the running loop — ending the stream, and with it `run()` and its
-    /// `defer` — then enters a fresh one, which loads the new entry on the worker's executor.
+    /// Switches models without leaving the live view. Bumping `attempt` restarts the loop:
+    /// `.task(id:)` cancels the running one — ending the stream, and with it `run()` and its
+    /// `defer` — then enters a fresh one, loading the new entry on the worker's executor.
+    /// `generation` moves in the same statement, or a pass landing in the gap before that fresh
+    /// `run()` republishes the old model's frame and charges its cost to the meter just reset.
     func select(_ entry: TPDModelEntry) {
         guard entry.id != selected?.id else { return }
         selected = entry
@@ -155,7 +157,7 @@ final class LiveViewModel {
         (frame, active, failure) = (nil, nil, nil)
         meter = PerformanceMeter()
         performance = meter.snapshot
-        attempt += 1
+        (generation, attempt) = (generation + 1, attempt + 1)
     }
 
     /// Runs until the enclosing `.task` is cancelled, which ends the stream and
@@ -163,8 +165,7 @@ final class LiveViewModel {
     func run() async {
         generation += 1
         let mine = generation
-        // A pass from the previous generation no longer clears this.
-        isInferring = false
+        isInferring = false  // a pass from the previous generation no longer clears it
         defer { if generation == mine { source.stop() } }
         guard let entry = selected else {
             failure = Self.failure(for: registryFailure
@@ -176,18 +177,23 @@ final class LiveViewModel {
             // load on the worker's executor. See `InferenceWorker.load(_:)`.
             try await worker.load(entry)
         } catch {
-            failure = Self.failure(for: error)
+            if generation == mine { failure = Self.failure(for: error) }
             return
         }
-        active = await worker.loaded
-        computeUnits = await worker.computeUnits
+        let built = await worker.loaded, units = await worker.computeUnits
+        // Superseded across the load: `active` would name the model just left, and the `start()`
+        // below would `begin()` a second stream, finishing the LIVE run's — a feed that dies.
+        guard generation == mine else { return }
+        (active, computeUnits) = (built, units)
         let stream: FrameStream
         do {
             stream = try await source.start()
         } catch {
-            failure = Self.failure(for: error)
+            if generation == mine { failure = Self.failure(for: error) }
             return
         }
+        // Superseded across `start()`: tear down the producer this run just installed.
+        guard generation == mine else { source.stop(); return }
         failure = nil
         for await video in stream {
             // Counted where it happens: one increment on a branch that already
@@ -215,7 +221,6 @@ final class LiveViewModel {
         attempt += 1
     }
 
-    /// A switch bumps `generation`, so a result from the model the user just left is dropped.
     private func finish(_ done: (frame: RenderedFrame, cost: PerformanceMeter.Sample)?,
                         _ error: Error?, _ generation: Int) {
         guard generation == self.generation else { return }

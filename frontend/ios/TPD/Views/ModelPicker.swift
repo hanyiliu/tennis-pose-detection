@@ -8,16 +8,32 @@ struct ModelPicker: View {
     let models: [TPDModelEntry]
     let selected: TPDModelEntry?
     let select: (TPDModelEntry) -> Void
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    /// The picker's ceiling: 50 pt of strip, the 6 pt gap, then the notes. Chip point sizes are
+    /// fixed, so only the notes move with Dynamic Type and `LiveCameraView` can reserve a constant.
+    static let maxHeight: CGFloat = 356
 
     var body: some View {
+        let notes = VStack(alignment: .leading, spacing: 6) {
+            ForEach(Self.notes(for: selected), id: \.self) { note in
+                Text(note).font(.caption2).foregroundStyle(.white.opacity(0.85))
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 15))
+            }
+        }
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) { ForEach(models) { chip($0) } }
                 .padding(5).background(.ultraThinMaterial, in: Capsule())
                 .overlay(Capsule().strokeBorder(.white.opacity(0.18)))
-            ForEach(Self.notes(for: selected), id: \.self) { note in
-                Text(note).font(.caption2).foregroundStyle(.white.opacity(0.85))
-                    .padding(.horizontal, 10).padding(.vertical, 5)
-                    .background(.ultraThinMaterial, in: Capsule())
+            // These reach ten lines each at an accessibility size, and a VStack short of room
+            // shrinks them: the class-order warning truncated mid-sentence while the strip left the
+            // top of the screen. Bounded and scrolled there, no chip moves and no word is lost.
+            // Branched, not measured — `ViewThatFits` sized to the greedy scroll view either way.
+            if typeSize.isAccessibilitySize, !Self.notes(for: selected).isEmpty {
+                ScrollView(.vertical) { notes }.frame(height: Self.maxHeight - 56).scrollIndicators(.visible)
+            } else {
+                notes
             }
         }
         .foregroundStyle(.white)
@@ -46,7 +62,7 @@ struct ModelPicker: View {
             entry.producesGeometry ? nil : "Classifier: one image in, \(entry.labels.count) "
                 + "numbers out. No box or keypoints to draw, so those switches are off here.",
             entry.labelOrder.status != .assumed ? nil : "Class order unverified: these names are "
-                + "assumed from the training code, with no dataset to confirm them. A prediction "
+                + "assumed from the training code, with no dataset to confirm them — a prediction "
                 + "may be reported under the wrong name.",
         ].compactMap { $0 }
     }
