@@ -126,8 +126,8 @@ final class LiveViewModel {
     /// and only re-attempts the load if it was the thing that failed.
     private let worker = InferenceWorker()
     private let source: any FrameSource
-    /// Which pass may still publish, bumped by `select()` too and re-read after every await in
-    /// `run()`. It says whether a run is stale, never what that run owns — `producer`'s job.
+    /// **Which pass may PUBLISH**, and only that. Bumped by `select()` too, re-read after every
+    /// await in `run()`. Not what a run owns (`producer`), not when the drop gate is released.
     private var generation = 0
     /// **What teardown may act on**, as a held thing rather than as a counter. `source` is shared
     /// and `stop()` finishes whichever stream is live, so a run stopping because it is merely
@@ -171,7 +171,6 @@ final class LiveViewModel {
     func run() async {
         generation += 1
         let mine = generation, claim = Producer()
-        isInferring = false  // a pass from the previous generation no longer clears it
         defer { if producer === claim { producer = nil; source.stop() } }
         guard let entry = selected else {
             failure = Self.failure(for: registryFailure
@@ -230,7 +229,8 @@ final class LiveViewModel {
 
     private func finish(_ done: (frame: RenderedFrame, cost: PerformanceMeter.Sample)?,
                         _ error: Error?, _ generation: Int) {
-        guard generation == self.generation else { return }
+        isInferring = false  // RELEASING THE GATE. Unconditional: the pass that set it clears it.
+        guard generation == self.generation else { return }  // PUBLISHING, and nothing else, below
         if let done {
             frame = done.frame
             meter.record(done.cost)
@@ -241,7 +241,6 @@ final class LiveViewModel {
             // transient fault mid-stream must not blank a working preview.
             failure = Self.failure(for: error)
         }
-        isInferring = false
     }
 
     private static func failure(for error: Error) -> Failure {

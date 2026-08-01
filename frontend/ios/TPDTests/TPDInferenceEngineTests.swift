@@ -59,6 +59,7 @@ final class TPDInferenceEngineTests: XCTestCase {
             let saw = "\(entry.id) said \(got.label) from \(got.probabilities)"
             XCTAssertEqual(got.probabilities.count, 4, saw)
             XCTAssertEqual(got.probabilities.reduce(0, +), 1, accuracy: 1e-4, saw)  // NaN fails too
+            XCTAssertTrue(got.probabilities.allSatisfy(\.isFinite), saw)
             XCTAssertTrue(entry.labels.contains(got.label), saw + " — not one of \(entry.labels)")
         }
     }
