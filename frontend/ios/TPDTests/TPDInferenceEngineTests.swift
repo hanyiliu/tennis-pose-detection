@@ -43,7 +43,6 @@ final class TPDInferenceEngineTests: XCTestCase {
         XCTAssertThrowsError(try TPDLabels.load(from: bundle, expecting: spec.numClasses + 1))
     }
 
-    /// Every package the registry offers: one the picker lists but the build lacks is dead.
     func testCompiledModelsAreInTheHostBundle() throws {
         for resource in try ModelRegistry.load(from: bundle).models.flatMap(\.resources) {
             XCTAssertNotNil(bundle.url(forResource: resource, withExtension: "mlmodelc"),
@@ -52,16 +51,14 @@ final class TPDInferenceEngineTests: XCTestCase {
     }
 
     /// `input.name`, `output.name` and `input.size` are only claims until a frame goes through
-    /// the compiled package: rename a feature in either export and it surfaces here rather than
-    /// on screen. Summing to 1 also pins the softmax `output.type: logits` asks for.
+    /// the compiled package. Summing to 1 also pins the softmax `output.type: logits` asks for.
     func testEachClassifierRunsAFrameThroughItsOwnPackage() throws {
         let pixels = try frame(320, 240) { x, y in x > y ? 220 : 40 }
         for entry in try ModelRegistry.load(from: bundle).models where entry.kind == .classifier {
             let got = try ClassifierEngine(entry: entry, bundle: bundle).predict(pixelBuffer: pixels)
             let saw = "\(entry.id) said \(got.label) from \(got.probabilities)"
             XCTAssertEqual(got.probabilities.count, 4, saw)
-            XCTAssertTrue(got.probabilities.allSatisfy(\.isFinite), saw)
-            XCTAssertEqual(got.probabilities.reduce(0, +), 1, accuracy: 1e-4, saw)
+            XCTAssertEqual(got.probabilities.reduce(0, +), 1, accuracy: 1e-4, saw)  // NaN fails too
             XCTAssertTrue(entry.labels.contains(got.label), saw + " — not one of \(entry.labels)")
         }
     }

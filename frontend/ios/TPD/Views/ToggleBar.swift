@@ -17,8 +17,8 @@ struct OverlayOptions: Equatable, Sendable {
 struct ToggleBar: View {
     @Binding var options: OverlayOptions
     /// False when the model predicts no geometry: a classifier has no box and no keypoints, so
-    /// those two go dim and inert — a switch that changes nothing reads as a bug — and
-    /// `ModelPicker` says why. True by default: the still and video previews are the pipeline.
+    /// those go dim and inert — a switch that changes nothing reads as a bug — and the picker
+    /// says why. True by default: the still and video previews are the pipeline.
     var geometry = true
 
     var body: some View {

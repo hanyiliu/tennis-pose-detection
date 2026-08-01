@@ -1,16 +1,14 @@
 //  TPDEngine.swift
-//  The interface both kinds of model satisfy, the one dispatch, and the smaller of the two
-//  engines — one image, four numbers. The pipeline keeps its own file.
+//  The interface both kinds satisfy, the one dispatch, and one image -> four numbers.
 
 import CoreImage
 import CoreML
 import CoreVideo
 import Foundation
 
-/// One frame in, one `TPDResult` out, whichever model is loaded. A classifier says it localized
-/// nothing by returning `bbox == nil` and no keypoints, never a zero rect — that draws, as a box at
-/// the origin. Class, not struct: implementations own `MLModel`s and pixel buffers `predict`
-/// rewrites, so they are not `Sendable`; one per domain, which the worker's actor gives them.
+/// One frame in, one `TPDResult` out, whichever model is loaded. A classifier localizes nothing
+/// by returning `bbox == nil`, never a zero rect — that draws, as a box at the origin. Class, not
+/// struct: it owns `MLModel`s and buffers `predict` rewrites, so it is not `Sendable`.
 protocol TPDEngine: AnyObject {
     var entry: TPDModelEntry { get }
     func predict(frame: CIImage) throws -> TPDResult
@@ -21,7 +19,6 @@ extension TPDEngine {
         try predict(frame: CIImage(cvPixelBuffer: pixelBuffer))
     }
 
-    /// An infinite or empty extent reaches Core ML as a crash rather than as an error.
     func frameSize(of frame: CIImage) throws -> CGSize {
         let extent = frame.extent
         guard !extent.isInfinite, !extent.isEmpty, extent.width >= 1, extent.height >= 1 else {
@@ -41,8 +38,7 @@ func makeEngine(_ entry: TPDModelEntry, bundle: Bundle = .main,
     }
 }
 
-/// Driven entirely by its registry entry — input size, feature names, softmax-or-not and the
-/// class names all come from `entry` — which is why nothing here knows which ResNet it holds.
+/// Driven entirely by its registry entry, which is why nothing here knows which ResNet it holds.
 final class ClassifierEngine: TPDEngine {
     let entry: TPDModelEntry
     private let model: MLModel
@@ -64,10 +60,9 @@ final class ClassifierEngine: TPDEngine {
         let pixels = try frameSize(of: frame)
         let side = entry.input.size
         // The WHOLE frame squashed to a square, aspect ratio deliberately lost — torchvision's
-        // `T.Resize((side, side))`, i.e. the PIL bilinear resample `TPDResample.bilinear` ports
-        // byte-exactly and `parity_check.py` measured these two packages against. Plain 0–255 RGB
-        // out of it: normalization is the graph's first op, so doing it here does it twice. And
-        // `entry.result` softmaxes iff output.type says logits, with this entry's OWN labels.
+        // `T.Resize((side, side))`, i.e. the PIL bilinear `TPDResample.bilinear` ports byte-exactly
+        // and `parity_check.py` measured these packages against. 0–255 RGB: normalization is the
+        // graph's first op, and `entry.result` softmaxes iff this entry's output.type says so.
         let full = bitmap(of: frame, CGRect(origin: .zero, size: pixels), context)
         write(TPDResample.resized(full, to: side, side, TPDResample.bilinear), into: buffer)
         let output = try run(model, on: buffer)

@@ -3,16 +3,16 @@
 
 import SwiftUI
 
-/// Every model the registry lists, plus the notes the *selected* one owes the user.
 struct ModelPicker: View {
     let models: [TPDModelEntry]
     let selected: TPDModelEntry?
     let select: (TPDModelEntry) -> Void
     @Environment(\.dynamicTypeSize) private var typeSize
 
-    /// The picker's ceiling: 50 pt of strip, the 6 pt gap, then the notes. Chip point sizes are
-    /// fixed, so only the notes move with Dynamic Type and `LiveCameraView` can reserve a constant.
-    static let maxHeight: CGFloat = 356
+    /// The picker's ceiling: 50 pt of strip, the 6 pt gap, then 144 pt of notes, from which
+    /// `LiveCameraView` reserves a constant. Low on purpose — the class caption is centred on this
+    /// same screen, and an explanation resting over the result it explains is worth less than none.
+    static let maxHeight: CGFloat = 200
 
     var body: some View {
         let notes = VStack(alignment: .leading, spacing: 6) {
@@ -26,15 +26,18 @@ struct ModelPicker: View {
             HStack(spacing: 6) { ForEach(models) { chip($0) } }
                 .padding(5).background(.ultraThinMaterial, in: Capsule())
                 .overlay(Capsule().strokeBorder(.white.opacity(0.18)))
-            // These reach ten lines each at an accessibility size, and a VStack short of room
-            // shrinks them: the class-order warning truncated mid-sentence while the strip left the
-            // top of the screen. Bounded and scrolled there, no chip moves and no word is lost.
-            // Branched, not measured — `ViewThatFits` sized to the greedy scroll view either way.
+            // These reach ten lines each at an accessibility size and a VStack short of room
+            // shrinks them, which truncated the warning mid-sentence. Bounded and scrolled instead,
+            // visibly: a hard cut reads as a sentence that stopped; under a fade and a chevron, no.
             if typeSize.isAccessibilitySize, !Self.notes(for: selected).isEmpty {
-                ScrollView(.vertical) { notes }.frame(height: Self.maxHeight - 56).scrollIndicators(.visible)
-            } else {
-                notes
-            }
+                // The inset is the fade's own height: at the end, the last line clears it.
+                ScrollView(.vertical) { notes.padding(.bottom, 48) }
+                    .frame(height: Self.maxHeight - 56)
+                    .mask(LinearGradient(colors: [.black, .black, .black, .clear],
+                                         startPoint: .top, endPoint: .bottom))
+                    .overlay(alignment: .bottom) { Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2).padding(6).background(.ultraThinMaterial, in: Circle()) }
+            } else { notes }
         }
         .foregroundStyle(.white)
     }

@@ -42,8 +42,7 @@ final class ModelRegistryTests: XCTestCase {
     }
 
     /// **The one that matters.** The pose-split ResNet puts forehand at index 0 where the others
-    /// put backhand, so one vector decoded through both must come back under two names — a shared
-    /// list would agree here and be wrong on screen. Then the honest "no geometry".
+    /// put backhand, so one vector decoded through both must come back under two names.
     func testTheSameVectorDecodesToDifferentNamesUnderDifferentLabelOrders() throws {
         let classifiers = try ModelRegistry.load(from: bundle).models.filter { $0.kind == .classifier }
         XCTAssertEqual(classifiers.count, 2)

@@ -30,9 +30,10 @@ struct LiveCameraView: View {
             Color.black.ignoresSafeArea()
             FramePreview(image: model.frame?.image)
             OverlayCanvas(result: model.frame?.result, options: model.overlay)
-            if model.frame == nil { emptyState }
             VStack(spacing: 0) {
-                Spacer(minLength: 0)
+                // A layout slot, not a ZStack layer: the room left over is the empty state's
+                // and the centred caption's, and the notes below can no longer reach it.
+                Color.clear.overlay { if model.frame == nil { emptyState } }
                 ModelPicker(models: model.models, selected: model.selected) { model.select($0) }
                     .padding(.horizontal, 14).padding(.bottom, 10)
                 controls
@@ -70,9 +71,7 @@ struct LiveCameraView: View {
         }
     }
 
-    /// `controls` is 46 pt of chip plus 12 pt either side at fixed point sizes, and `ModelPicker`
-    /// scrolls its notes rather than grow past `maxHeight`, so one constant clears both. 200 did
-    /// not: the bottom stack measured ~222 pt at default size once two captions showed.
+    /// `controls` is 46 pt of chip plus 12 either side, fixed, and the picker has a ceiling.
     private static let controlsClearance: CGFloat = ModelPicker.maxHeight + 10 + 70
 
     private var controls: some View {

@@ -18,8 +18,8 @@ struct TPDKeypoint: Sendable, Equatable {
 struct TPDResult: Sendable, Equatable {
     /// Size of the frame the bbox and keypoints are expressed in.
     let frameSize: CGSize
-    /// Stage-1 crop rect, in frame pixels, after the integer rounding and clamping — and
-    /// **nil from a classifier**, not `.zero`, which draws as a box at the origin.
+    /// Stage-1 crop rect in frame pixels, rounded and clamped — and **nil from a classifier**,
+    /// not `.zero`, which draws as a box at the origin.
     let bbox: CGRect?
     /// One entry per keypoint channel, in checkpoint channel order; empty from a classifier.
     let keypoints: [TPDKeypoint]

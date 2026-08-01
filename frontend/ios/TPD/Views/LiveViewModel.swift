@@ -126,10 +126,16 @@ final class LiveViewModel {
     /// and only re-attempts the load if it was the thing that failed.
     private let worker = InferenceWorker()
     private let source: any FrameSource
-    /// Which `run()` owns `source`, and which pass may still publish. A stale `defer` calling
-    /// `stop()` after the new run's `start()` kills it; `select()` bumps this too; and every
-    /// awaited step in `run()` re-reads it before writing anything shared or starting anything.
+    /// Which pass may still publish, bumped by `select()` too and re-read after every await in
+    /// `run()`. It says whether a run is stale, never what that run owns — `producer`'s job.
     private var generation = 0
+    /// **What teardown may act on**, as a held thing rather than as a counter. `source` is shared
+    /// and `stop()` finishes whichever stream is live, so a run stopping because it is merely
+    /// *stale* tears down the producer the LIVE run is reading. A run claims this as it starts one
+    /// — both sources open their stream synchronously inside `start()` — and stops only while it
+    /// still holds the claim. A run that started none holds nothing and stops nothing.
+    private final class Producer {}
+    private var producer: Producer?
     /// **The drop gate.** Capture runs at 30–60 fps and one three-stage pass does
     /// not. While this is true every arriving frame is discarded unread, so the
     /// engine always works on the newest frame rather than an ageing queue. The
@@ -141,15 +147,15 @@ final class LiveViewModel {
         self.source = source
         do {
             let registry = try ModelRegistry.load()
-            (models, selected, registryFailure) = (registry.models, registry.first, nil)
+            (models, selected, registryFailure) = (registry.models, registry.models[0], nil)
         } catch { registryFailure = error }
     }
 
     /// Switches models without leaving the live view. Bumping `attempt` restarts the loop:
     /// `.task(id:)` cancels the running one — ending the stream, and with it `run()` and its
     /// `defer` — then enters a fresh one, loading the new entry on the worker's executor.
-    /// `generation` moves in the same statement, or a pass landing in the gap before that fresh
-    /// `run()` republishes the old model's frame and charges its cost to the meter just reset.
+    /// `generation` moves in the same statement, or a pass landing in the gap republishes the
+    /// old model's frame and charges its cost to the meter `select()` just reset.
     func select(_ entry: TPDModelEntry) {
         guard entry.id != selected?.id else { return }
         selected = entry
@@ -164,9 +170,9 @@ final class LiveViewModel {
     /// therefore this loop. Never throws: every failure becomes a visible state.
     func run() async {
         generation += 1
-        let mine = generation
+        let mine = generation, claim = Producer()
         isInferring = false  // a pass from the previous generation no longer clears it
-        defer { if generation == mine { source.stop() } }
+        defer { if producer === claim { producer = nil; source.stop() } }
         guard let entry = selected else {
             failure = Self.failure(for: registryFailure
                 ?? TPDInferenceError.resourceMissing(ModelRegistry.resource + ".json"))
@@ -181,19 +187,20 @@ final class LiveViewModel {
             return
         }
         let built = await worker.loaded, units = await worker.computeUnits
-        // Superseded across the load: `active` would name the model just left, and the `start()`
+        // Superseded across the load: `active` would name the model just left, and `start()`
         // below would `begin()` a second stream, finishing the LIVE run's — a feed that dies.
         guard generation == mine else { return }
         (active, computeUnits) = (built, units)
         let stream: FrameStream
+        producer = claim  // starting one is claiming it, and supersedes the previous claim
         do {
             stream = try await source.start()
         } catch {
             if generation == mine { failure = Self.failure(for: error) }
             return
         }
-        // Superseded across `start()`: tear down the producer this run just installed.
-        guard generation == mine else { source.stop(); return }
+        // Superseded across `start()`: publish nothing. Teardown is not this guard's call.
+        guard generation == mine else { return }
         failure = nil
         for await video in stream {
             // Counted where it happens: one increment on a branch that already

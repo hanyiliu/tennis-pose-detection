@@ -4,17 +4,16 @@
 import CoreGraphics
 import Foundation
 
-/// One shipped model, as `tools/export_comparison.py` writes it. Three fields can never be
-/// assumed in Swift, because each is silent when wrong: `output.type` (a second softmax keeps the
-/// argmax but flattens every confidence), `labels` (per model — the pose-split ResNet puts forehand
-/// at 0 where the others put backhand), and `labelOrder.status`, which the picker owes the user.
+/// One shipped model, as `tools/export_comparison.py` writes it. Three fields are silent when
+/// wrong, so none may be assumed: `output.type` (a second softmax keeps the argmax and flattens
+/// every confidence), `labels` (forehand sits at 0 in one ResNet and at 1 in the other two), and
+/// `labelOrder.status`, which the picker owes the user.
 struct TPDModelEntry: Decodable, Sendable, Equatable, Identifiable {
     enum Kind: String, Decodable, Sendable { case pipeline, classifier }
     enum OutputType: String, Decodable, Sendable { case logits, probabilities }
     enum OrderStatus: String, Decodable, Sendable { case derived, assumed }
 
-    /// `normalizationBakedIn`: the mean/std divide is the graph's first op, so Swift hands over
-    /// plain 0–255 RGB and the registry's own mean/std stay documentation, left undecoded here.
+    /// The mean/std divide is the graph's first op, so the registry's copy stays undecoded here.
     struct Input: Decodable, Sendable, Equatable { let name: String, size: Int, normalizationBakedIn: Bool }
     struct Output: Decodable, Sendable, Equatable { let name: String; let type: OutputType }
     struct LabelOrder: Decodable, Sendable, Equatable { let status: OrderStatus, source: String }
@@ -34,8 +33,7 @@ struct TPDModelEntry: Decodable, Sendable, Equatable, Identifiable {
 
     /// **The one place a raw output vector becomes a named prediction.** Both engines return
     /// through here, so neither the softmax decision nor the label lookup can drift from the
-    /// registry, and a test drives it without Core ML. `bestIndex` is the FIRST peak — a tie
-    /// keeps the earlier class — or -1 for an all-NaN vector, which reads as "unknown".
+    /// registry. `bestIndex` is the FIRST peak, or -1 for an all-NaN vector, reading "unknown".
     func result(from raw: [Float], frameSize: CGSize,
                 bbox: CGRect? = nil, keypoints: [TPDKeypoint] = []) throws -> TPDResult {
         guard raw.count == labels.count else { throw TPDInferenceError.unexpectedOutput(
@@ -71,7 +69,6 @@ struct ModelRegistry: Decodable, Sendable, Equatable {
 
     let schemaVersion: Int
     let models: [TPDModelEntry]
-    var first: TPDModelEntry { models[0] }
 
     func first(of kind: TPDModelEntry.Kind) throws -> TPDModelEntry {
         guard let entry = models.first(where: { $0.kind == kind }) else { throw Self.malformed(
@@ -85,7 +82,6 @@ struct ModelRegistry: Decodable, Sendable, Equatable {
         return try decode(try Data(contentsOf: url))
     }
 
-    /// Split from `load` so a test can hand it a deliberately broken document.
     static func decode(_ data: Data) throws -> ModelRegistry {
         let registry: ModelRegistry
         do { registry = try JSONDecoder().decode(ModelRegistry.self, from: data) }
