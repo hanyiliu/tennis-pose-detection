@@ -22,7 +22,7 @@ SRC_DIRS    := TPD TPDTests
 SIM_DEVICE  ?=
 CONFIG      ?= Debug
 
-.PHONY: all venv export parity generate lint build clean
+.PHONY: all venv export export-3stage export-comparison parity generate lint build clean
 .DEFAULT_GOAL := lint
 
 all: generate lint
@@ -52,12 +52,22 @@ venv: $(PY)
 # TPDModelSpec.json, all into $(MODELS_DIR). The .mlpackage bundles are
 # git-ignored on purpose; the two JSON sidecars are committed, so re-running
 # this and seeing a diff in them is the intended way to surface model drift.
-export: venv
+# `export` is every model the app can select, because `parity` gates every model the app can select;
+# the halves stay separate targets so one can be re-exported while iterating.
+export: export-3stage export-comparison
+
+export-3stage: venv
 	@test -f $(TOOLS)/export_coreml.py || \
 		{ echo "missing $(TOOLS)/export_coreml.py (lands with the export PR)"; exit 1; }
 	@test -f $(CHECKPOINT) || { echo "missing checkpoint $(CHECKPOINT)"; exit 1; }
 	mkdir -p $(MODELS_DIR)
 	$(PY) $(TOOLS)/export_coreml.py --checkpoint $(CHECKPOINT) --out-dir $(MODELS_DIR)
+
+# The two comparison ResNet-18s plus TPDModelRegistry.json, which describes all three models. It READS
+# TPDModelSpec.json/TPDLabels.json, so the prerequisite is what keeps it after export-3stage even under
+# `make -j`, where it would otherwise describe the PREVIOUS export (and made $(MODELS_DIR) already).
+export-comparison: export-3stage
+	$(PY) $(TOOLS)/export_comparison.py --out-dir $(MODELS_DIR)
 
 # Runs the same fixture through torch and through the converted packages and
 # asserts they agree at fp16 tolerances.

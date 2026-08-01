@@ -1,6 +1,8 @@
 # iOS model export tooling
 
-Converts the trained end-to-end checkpoint into the Core ML packages the iOS app loads.
+Converts the trained checkpoints into the Core ML packages the iOS app loads — the 3-stage model
+(`export_coreml.py`) and the two comparison ResNet-18s (`export_comparison.py`). `make export` runs
+both, `make parity` gates all three.
 
 ## Run it
 
@@ -56,6 +58,33 @@ Stage 1 stays a separate package because the crop between stages depends on stag
 cannot be expressed with static shapes. If the fused stage 2+3 conversion ever fails, the script
 prints the reason, writes no `TPDPoseNet.mlpackage`, and exits non-zero pointing at the 3-model
 fallback in `frontend/IOS_IMPLEMENTATION_PLAN.md` §3 — it never emits a broken package.
+
+## The comparison ResNet-18s
+
+`export_comparison.py` emits `TPDResNetKaggle160.mlpackage` and `TPDResNetPose256.mlpackage` (160 and
+256px RGB **0-255** → `logits` (1,4), 21.3 MB each) plus `TPDModelRegistry.json` — one array of
+self-describing entries for all three shipped models, so a fourth is an entry, not a Swift change,
+while `TPDModelSpec.json`/`TPDLabels.json` stay the 3-stage model's truth and are *read* by it.
+**Three contracts the client must not guess**, each silent when wrong: both ResNets emit **raw
+logits** while the 3-stage model already softmaxed; `pose_dataset.py` hardcodes `forehand=0,
+backhand=1`, so indices 0 and 1 mean **opposite** things across the two ResNets; and the three class
+orders are not equally *known* — `labelOrder.status` says which, so a guess ships as a guess. All are
+registry fields, and `make parity`'s CONTRACT TRAPS table asserts a measurement against each for
+**every** model — the 3-stage pipeline included, since it is also the frame the classifiers' orders
+are compared against, and gating only the compared things lets their reference drift unasserted.
+
+| model | order | status | asserted against |
+|---|---|---|---|
+| `tpd_3stage` | `backhand, forehand, …` | `derived` | the checkpoint's own `label_names` |
+| `resnet18_pose_256` | `forehand, backhand, …` | `derived` | `pose_dataset.py`'s `class_to_idx` |
+| `resnet18_kaggle_160` | `backhand, forehand, …` | `assumed` | **not** what its training code does |
+
+`Kaggle_Model/dataset.py` does have a `sorted()` over class folder names, but only in the branch that
+rebuilds a split from `image_paths`/`image_labels` — it runs once labels exist and assigns none. The
+branch that *trains* assigns ids in **first-encounter order** over `glob()`: extension then
+filesystem order, not the alphabet. **No dataset is checked in and no kagglehub cache exists, so this
+repo cannot confirm that order at all** — alphabetical is a guess, shipped as one; one still of a
+known forehand settles it, one word in `SPECS`. The derived order is unconfirmed on images too.
 
 ## Why the pins are so low
 

@@ -37,9 +37,12 @@ visibility-weighted centre and a masked min/spread over all 18 keypoints, so ONE
 channel perturbs 76 of the 130 stage-3 features. An input whose keypoints did not fully
 agree cannot grade the classifier and is excluded -- but a run where too few inputs are
 gradeable FAILS as vacuous rather than reporting a green pass.
-"""
+
+Each comparison ResNet-18 gets a tolerance table, and all three share a **contract traps** table
+asserting MEASUREMENTS against registry fields -- the pipeline too, being the others' reference frame."""
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -56,6 +59,7 @@ if str(TOOLS_DIR) not in sys.path:
 # wrong reference. Importing it also puts REPO_ROOT on sys.path.
 from export_coreml import (  # noqa: E402
     DROPOUT, VISIBILITY_THRESHOLD, PoseNet, find_repo_root, square_size)
+from export_comparison import SPECS, Normalized, build  # noqa: E402
 
 REPO_ROOT = find_repo_root(Path(__file__).resolve())
 
@@ -128,6 +132,21 @@ MIN_GRADEABLE_FRACTION = 0.15
 # Cycled through in end-to-end mode; non-square and both orientations so the letterbox
 # padding is exercised on each axis.
 FRAME_SIZES = ((640, 360), (720, 1280), (512, 512), (960, 540))
+
+# --- comparison ResNet-18 gates --------------------------------------------------
+# Calibrated like the gates above, over 20 seeds x 8 inputs x {cpu, all} x 2 models = 640 runs: max
+# |dlogit| 6.32e-03, max|dprob| 2.04e-03, gradeable 50-54%, ZERO argmax flips on any of the 640.
+RESNET_LOGIT_TOL = 3e-2      # 4.7x the measured worst; fat on purpose, unseen seeds draw wider
+RESNET_PROB_TOL = 1e-2       # 4.9x, and 1/30 of the tie gap below
+RESNET_TIE_GAP = 3e-1   # as CLASS_TIE_GAP: too wide for RESNET_PROB_TOL on each to swap the top 2
+RESNET_MIN_GRADEABLE_FRACTION = 0.15   # measured 50-54%; the floor only catches a vacuous run
+# --- contract traps --------------------------------------------------------------
+# Each trap asserts a MEASUREMENT against the REGISTRY FIELD the client branches on, per model:
+# measuring a convention and never checking `output.type` leaves the registry free to lie. Saw 1.132.
+LOGIT_SUM_MARGIN = 5e-1  # logits need not sum to 1: MIN |sum-1|, so one near 1 cannot carry the run
+PROB_SUM_TOL = 1e-4      # a declared "probabilities" gates the MAXIMUM: one bad vector breaks it
+NORM_TOL = 1e-4          # declared (mean, std) vs real preprocessing; the exporter's own limit
+MIN_ORDER_SENSITIVE = 1  # predictions the wrong label list renames; 0 proves nothing. Saw 126/320
 
 
 # --- synthetic inputs ------------------------------------------------------------
@@ -271,6 +290,157 @@ class CoreML:
         return probs, kps
 
 
+def softmax(logits: np.ndarray) -> np.ndarray:
+    shifted = np.exp(logits - logits.max())
+    return shifted / shifted.sum()
+
+
+class Convention:
+    """What an output vector IS, per model, so ``output.type`` is CHECKED rather than believed."""
+
+    def __init__(self):
+        self.sum_min, self.sum_max, self.value_min = np.inf, 0.0, np.inf
+
+    def observe(self, *vectors) -> None:
+        for vector in vectors:
+            deviation = abs(float(vector.sum()) - 1.0)
+            self.sum_min, self.sum_max = min(self.sum_min, deviation), max(self.sum_max, deviation)
+            self.value_min = min(self.value_min, float(vector.min()))
+
+    def row(self, model_id: str, declared: str):
+        """Wrong either way fails: "logits" for a softmaxed head collapses ``sum_min`` to ~0 and
+        "probabilities" for a logit head blows ``sum_max``. An unrecognised type gates nothing."""
+        probs = declared == "probabilities"
+        seen, limit = ((self.sum_max, f"< {PROB_SUM_TOL:g}, >= 0") if probs
+                       else (self.sum_min, f">= {LOGIT_SUM_MARGIN:g}, < 0"))
+        held = ((seen < PROB_SUM_TOL and self.value_min >= 0.0) if probs
+                else (seen >= LOGIT_SUM_MARGIN and self.value_min < 0.0))
+        return Row(f"output.type '{declared}': {model_id}",
+                   f"sum-1 {seen:.3g}, min {self.value_min:+.2f}", limit,
+                   held and declared in ("logits", "probabilities"))
+
+
+class ResNet:
+    """One comparison ResNet-18: both stacks and the running worst cases, driven by its registry
+    entry. Its torch side is ``export_comparison.build`` -- the code that produced the package."""
+
+    def __init__(self, entry: dict, models_dir: Path, compute_units: str):
+        import coremltools as ct
+
+        # Shape and provenance only: the class ORDER is the labels trap's to assert, and a check
+        # that has already exited leaves that row describing something it can never fail on.
+        spec = next((s for s in SPECS if s["id"] == entry["id"]), None)
+        if (spec is None or spec["label_order"] != entry["labelOrder"]
+                or len(spec["labels"]) != len(entry["labels"])):
+            raise SystemExit(f"registry entry '{entry['id']}' names no model export_comparison.py "
+                             "builds, or its class count / labelOrder provenance is stale")
+        self.id, self.size, self.labels = entry["id"], entry["input"]["size"], entry["labels"]
+        self.output, self.declared = entry["output"]["name"], entry["output"]["type"]
+        self.status, self.display = entry["labelOrder"]["status"], entry["displayName"]
+        self.entry, self.source = entry, list(spec["labels"])   # source = the exporter's own order
+        self.torch = Normalized(build(spec, REPO_ROOT / spec["checkpoint"])).eval()
+        units = ct.ComputeUnit.CPU_ONLY if compute_units == "cpu" else ct.ComputeUnit.ALL
+        self.coreml = ct.models.MLModel(str(models_dir / entry["packages"][0]), compute_units=units)
+        self.inputs = self.gradeable = self.agree = self.order_sensitive = 0
+        self.logit, self.prob, self.convention, self.predicted = 0.0, 0.0, Convention(), {}
+        # The affine this graph really bakes in vs the one the REGISTRY's (mean, std) implies, so
+        # perturbing `input.mean` fails here, not on device. Off the buffers, not the package: the
+        # package's copy is a fused fp16 batch_norm whose beta reads 7.16e-04 out, 7x NORM_TOL.
+        baked = self.torch.scale.flatten().tolist() + self.torch.bias.flatten().tolist()
+        self.norm = max(abs(a - b) for a, b in zip(registry_affine(entry), baked))
+
+    @torch.no_grad()
+    def add(self, label: str, crop: Image.Image, shared_labels, verbose: bool):
+        # Same pixels both sides: normalization is inside both graphs, not in the caller.
+        raw = torch.from_numpy(np.array(crop)).permute(2, 0, 1).unsqueeze(0).float()
+        ref = self.torch(raw).squeeze(0).numpy().astype(np.float64)
+        ml = np.asarray(self.coreml.predict({"image": crop})[self.output], np.float64).reshape(-1)
+        self.inputs += 1
+        # No NaN row here: a non-finite logit makes this max NaN and `NaN < tol` is False anyway.
+        self.logit = max(self.logit, float(np.max(np.abs(ref - ml))))
+        self.convention.observe(ref, ml)   # both stacks: a Core ML-side lie counts too
+
+        ref_probs, ml_probs = softmax(ref), softmax(ml)
+        delta = float(np.max(np.abs(ref_probs - ml_probs)))
+        ref_class, ml_class = int(np.argmax(ref)), int(np.argmax(ml))
+        gradeable = float(np.diff(np.sort(ref_probs)[-2:])[0]) > RESNET_TIE_GAP
+        if gradeable:
+            self.gradeable += 1
+            self.prob = max(self.prob, delta)
+            self.agree += int(ref_class == ml_class)
+        # The label trap on real predictions: this order and the pipeline's name the winner apart.
+        name = self.labels[ref_class]
+        self.predicted[name] = self.predicted.get(name, 0) + 1
+        self.order_sensitive += int(name != shared_labels[ref_class])
+        if verbose:
+            print(f"    {self.id} {label}  |dprob| {delta:.2e}  class {ref_class}/{ml_class}"
+                  f" = {name}  {'gradeable' if gradeable else 'ungraded'}")
+
+    def rows(self) -> list:
+        floor = int(np.ceil(RESNET_MIN_GRADEABLE_FRACTION * self.inputs))
+        return [Row("logits max|d| (fp16 conversion)", f"{self.logit:.3e}",
+                    f"< {RESNET_LOGIT_TOL:g}", self.logit < RESNET_LOGIT_TOL),
+                Row("class probability max|d|, gradeable", f"{self.prob:.3e}",
+                    f"< {RESNET_PROB_TOL:g}", self.gradeable > 0 and self.prob < RESNET_PROB_TOL),
+                Row("class argmax, gradeable inputs", f"{self.agree}/{self.gradeable}",
+                    f"{self.gradeable}/{self.gradeable}",
+                    self.gradeable > 0 and self.agree == self.gradeable),
+                Row("gradeable inputs (torch top-2 gap)", f"{self.gradeable}/{self.inputs}",
+                    f">= {floor}", self.gradeable >= max(floor, 1)),
+                Row("torch predictions, OWN label order",
+                    ", ".join(f"{n} x{c}" for n, c in sorted(self.predicted.items())) or "-", "-")]
+
+
+def registry_affine(entry: dict) -> list:
+    """The six numbers ``(x/255 - mean)/std`` claims a package applies to 0-255 pixels: scale, bias."""
+    mean, std = entry["input"]["mean"], entry["input"]["std"]
+    return [1.0 / (255.0 * s) for s in std] + [-m / s for m, s in zip(mean, std)]
+
+
+def package_affine(model) -> list:
+    """The same six, folded off a package's OWN MIL program -- so the pipeline's row measures rather
+    than restates a constant. Its preprocessing is ``ct.ImageType(scale=1/255)``: one fp32 ``mul`` on
+    the image tensor ahead of every other op. No chain means scale 1 / bias 0, which fails the row."""
+    spec = model.get_spec()
+    block = next(iter(spec.mlProgram.functions["main"].block_specializations.values()))
+    scale, bias, tensor, const = [1.0] * 3, [0.0] * 3, spec.description.input[0].name, {}
+    for op in block.operations:
+        if op.type == "const":
+            const[op.outputs[0].name] = list(op.attributes["val"].immediateValue.tensor.floats.values)
+        elif op.type in ("mul", "add") and op.inputs["x"].arguments[0].name == tensor:
+            v = np.asarray(const.get(op.inputs["y"].arguments[0].name) or [np.nan], float)
+            v = v if v.size in (1, 3) else np.float64("nan")   # not per-channel: NaN fails the row
+            scale, bias = ((scale * v, bias * v) if op.type == "mul" else (scale, bias + v))
+            tensor = op.outputs[0].name
+    return list(np.broadcast_to(scale, 3)) + list(np.broadcast_to(bias, 3))
+
+
+def trap_rows(measured, resnets, shared) -> list:
+    """Every model's DECLARED contract vs what its tensors and its package did: one row per model per
+    contract, never one representative. *measured* is (registry entry, Convention, affine max|d|, the
+    order read from that entry's OWN declared source), all three -- pipeline in the labels family too:
+    it is the frame the rest are read in, and an unasserted reference lets a drifting pipeline order
+    re-anchor every "deviates" verdict while all of them still pass."""
+    rows = [convention.row(e["id"], e["output"]["type"]) for e, convention, _, _ in measured]
+    rows += [Row(f"input.mean/std: {e['id']}", f"max|d| {norm:.1e}", f"< {NORM_TOL:g}",
+                 norm < NORM_TOL) for e, _, norm, _ in measured]
+    for entry, _, _, source in measured:   # EVERY model, reference included; never one representative
+        labels = entry["labels"]
+        # Where this model's indices land in the pipeline's order: 0,1,2,3 same, 1,0,2,3 the swap.
+        mapping = ",".join(str(shared.index(n)) if n in shared else "?" for n in labels)
+        rows.append(Row(f"labels [{entry['labelOrder']['status']}]: {entry['id']}",
+                        f"pipeline idx {mapping}", "= source, perm",
+                        list(labels) == list(source) and sorted(labels) == sorted(shared)))
+    # The vacuity guard: nothing deviating and nothing renamed makes the rows above trivially true.
+    # `>= 1` and not a bare count -- print_table gates `is not False`, which a plain 0 would pass.
+    deviating = sum(list(r.labels) != list(shared) for r in resnets)
+    sensitive, total = sum(r.order_sensitive for r in resnets), sum(r.inputs for r in resnets)
+    return rows + [
+        Row("classifier orders that deviate", f"{deviating}/{len(resnets)}", ">= 1", deviating >= 1),
+        Row("predictions the wrong list would rename", f"{sensitive}/{total} inputs",
+            f">= {MIN_ORDER_SENSITIVE}", sensitive >= MIN_ORDER_SENSITIVE)]
+
+
 # --- prominence ------------------------------------------------------------------
 def flat_index(kps: np.ndarray, size: int) -> np.ndarray:
     """Rebuild the flat heatmap argmax index the decode produced from its x,y output."""
@@ -338,6 +508,7 @@ class Stats:
         self.identical = Peaks()
         self.split = Peaks()
         self.prob = self.bbox = 0.0
+        self.convention = Convention()
         self.gradeable = self.class_agree = 0
         self.rect_equal = self.rect_total = 0
         self.nonfinite = []
@@ -374,6 +545,7 @@ class Stats:
         gradeable = (same_pixels and not relocated.any()
                      and (ordered[-1] - ordered[-2]) > CLASS_TIE_GAP)
         prob_delta = float(np.max(np.abs(ref_probs - ml_probs)))
+        self.convention.observe(ref_probs, ml_probs)   # stage 3 softmaxed, so these sum to 1
         ref_class, ml_class = int(np.argmax(ref_probs)), int(np.argmax(ml_probs))
         if gradeable:
             self.gradeable += 1
@@ -517,27 +689,44 @@ def main() -> int:
     models_dir = args.models_dir.expanduser().resolve()
     if not checkpoint.is_file():
         raise SystemExit(f"checkpoint not found: {checkpoint}")
-    for name in ("TPDBBox.mlpackage", "TPDPoseNet.mlpackage"):
-        if not (models_dir / name).exists():
-            raise SystemExit(f"missing {models_dir / name} -- run `make export` from frontend/ios")
+    registry_path = models_dir / "TPDModelRegistry.json"
+    if not registry_path.is_file():
+        raise SystemExit(f"missing {registry_path} -- run `make export` from frontend/ios")
+    registry = json.loads(registry_path.read_text())
+    missing = [n for e in registry["models"] for n in e["packages"] if not (models_dir / n).exists()]
+    if missing:
+        raise SystemExit(f"missing {missing} -- run `make export` from frontend/ios")
 
     print(f"repo root   {REPO_ROOT}\ncheckpoint  {checkpoint}\nmodels dir  {models_dir}")
     reference = Reference(checkpoint)
     coreml = CoreML(models_dir, args.compute_units)
+    pipeline = next(e for e in registry["models"] if e["kind"] == "pipeline")
+    resnets = [ResNet(e, models_dir, args.compute_units)
+               for e in registry["models"] if e["kind"] == "classifier"]
+    if not resnets:
+        raise SystemExit("registry lists no classifier models -- nothing to compare")
     seeds = list(range(args.seed, args.seed + args.num_seeds))
     print(f"models      {reference.bbox_size}px bbox, {reference.kp_size}px keypoint, "
           f"{reference.num_keypoints} keypoints, {reference.num_classes} classes "
           f"{reference.labels}")
+    print("comparison  " + ", ".join(f"{r.id} @{r.size}px" for r in resnets))
     print(f"inputs      {args.num_inputs} per seed per mode, seeds {seeds}, "
           f"compute units {coreml.units}")
 
     same, e2e = Stats(), Stats()
+    # One 3-stage convention over both runs; the resnets' scenes are drawn at the larger size.
+    e2e.convention, biggest = same.convention, max(r.size for r in resnets)
     for position, seed in enumerate(seeds):
         rng = np.random.default_rng(seed)
         crops = make_crops(rng, reference.kp_size, args.num_inputs, probes=position == 0)
         frames = make_frames(rng, args.num_inputs)
         run_same_crop(reference, coreml, crops, f"same s{seed}", same, args.verbose)
         run_end_to_end(reference, coreml, frames, f"e2e  s{seed}", e2e, args.verbose)
+        # One scene per input, resampled per model, so the label trap compares like with like.
+        for index, big in enumerate(make_crops(rng, biggest, args.num_inputs, position == 0)):
+            for r in resnets:
+                crop = big if r.size == biggest else big.resize((r.size,) * 2, Image.Resampling.BILINEAR)
+                r.add(f"s{seed}:{index}", crop, pipeline["labels"], args.verbose)
 
     torch_sum, coreml_sum, (ref_class, ml_class) = same.probe
     rows = pose_rows(same, split_rows=False)
@@ -561,6 +750,20 @@ def main() -> int:
         "gated over the identical-rect frames only; [info] rows are the rounding's own noise",
         e2e_rows,
     ) and ok
+
+    for r in resnets:
+        ok = print_table(f"{r.id.upper()}  {r.size}px RGB -> {r.declared} ({r.inputs} inputs)",
+                         f"{r.display}; class order {r.labels} [{r.status}]", r.rows()) and ok
+
+    # The 3-stage model joins on equal terms -- same tuple, same rows -- so no model is exempt, and
+    # its labels row pins the reference frame to `label_names` in the checkpoint it names as source.
+    drift = max(abs(a - b) for m in (coreml.bbox_model, coreml.pose_model)
+                for a, b in zip(package_affine(m), registry_affine(pipeline)))
+    measured = [(pipeline, same.convention, drift, reference.labels)] + [
+        (r.entry, r.convention, r.norm, r.source) for r in resnets]
+    ok = print_table("CONTRACT TRAPS  measured behaviour vs the registry fields the client uses",
+                     "every model the app can select; each labels row vs its own labelOrder.source",
+                     trap_rows(measured, resnets, pipeline["labels"])) and ok
 
     print("\nPARITY OK" if ok else "\nPARITY FAILED")
     return 0 if ok else 1
