@@ -18,9 +18,10 @@ struct TPDKeypoint: Sendable, Equatable {
 struct TPDResult: Sendable, Equatable {
     /// Size of the frame the bbox and keypoints are expressed in.
     let frameSize: CGSize
-    /// Stage-1 crop rect, in frame pixels, after the integer rounding and clamping.
-    let bbox: CGRect
-    /// One entry per keypoint channel, in checkpoint channel order.
+    /// Stage-1 crop rect, in frame pixels, after the integer rounding and clamping — and
+    /// **nil from a classifier**, not `.zero`, which draws as a box at the origin.
+    let bbox: CGRect?
+    /// One entry per keypoint channel, in checkpoint channel order; empty from a classifier.
     let keypoints: [TPDKeypoint]
     /// Class probabilities aligned with `labels`, already softmaxed by the model, and the
     /// class names from `TPDLabels.json` in checkpoint order.
@@ -48,13 +49,14 @@ struct TPDModelSpec: Decodable, Sendable, Equatable {
     var bboxModelResource: String { (bboxModel as NSString).deletingPathExtension }
     var poseModelResource: String { (poseModel as NSString).deletingPathExtension }
 
-    static func load(from bundle: Bundle) throws -> TPDModelSpec {
-        let spec: TPDModelSpec = try decode(resource: "TPDModelSpec", from: bundle)
+    /// `resource` comes from the registry entry's `build.pipelineSpec`.
+    static func load(from bundle: Bundle, resource: String = "TPDModelSpec") throws -> TPDModelSpec {
+        let spec: TPDModelSpec = try decode(resource: resource, from: bundle)
         guard spec.bboxInputSize > 0, spec.keypointInputSize > 0, spec.numKeypoints > 0,
               spec.numClasses > 0, !spec.bboxModelResource.isEmpty,
               !spec.poseModelResource.isEmpty else {
             throw TPDInferenceError.malformedResource(
-                "TPDModelSpec.json", reason: "sizes and counts must be positive and model names "
+                resource + ".json", reason: "sizes and counts must be positive and model names "
                     + "non-empty, got bbox \(spec.bboxInputSize), keypoint "
                     + "\(spec.keypointInputSize), keypoints \(spec.numKeypoints), "
                     + "classes \(spec.numClasses)")

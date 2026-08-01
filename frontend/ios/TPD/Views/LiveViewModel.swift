@@ -25,13 +25,12 @@ struct RenderedFrame: @unchecked Sendable {
 /// call — so actor isolation, one instance, serialized calls, is exactly the
 /// contract it asks for, and is what makes this legal under Swift 6.
 actor InferenceWorker {
-    /// Built by `load()`, **never** by `init` — which is the whole reason this
+    /// Built by `load(_:)`, **never** by `init` — which is the whole reason this
     /// is a `var?`. An actor's `init` body runs synchronously in the *caller's*
-    /// isolation domain; it does not hop to the actor. So `TPDInferenceEngine()`
-    /// inside one performs both `MLModel(contentsOf:)` loads on whatever thread
+    /// isolation domain; it does not hop to the actor. So building an engine
+    /// inside one performs every `MLModel(contentsOf:)` load on whatever thread
     /// said `InferenceWorker()` — main — and froze the UI for 1.5s at launch.
-    /// Do not "simplify" this back to `let engine` plus a throwing `init`.
-    private var engine: TPDInferenceEngine?
+    private var engine: (any TPDEngine)?
     /// Display rasterization only. Pointedly *not* the engine's context, whose
     /// colour management is switched off for numeric parity with the Python
     /// pipeline — those settings are for matching floats, not for looking right.
@@ -43,15 +42,14 @@ actor InferenceWorker {
     private var display: CIContext?
     /// Read back by the HUD, from the configuration actually handed to the engine.
     private(set) var computeUnits: MLComputeUnits?
+    var loaded: TPDModelEntry? { engine?.entry }
 
-    /// Loads both Core ML models, off the main actor. Idempotent, so a caller
-    /// re-entering the loop after a failure retries the load rather than
-    /// assuming it already happened.
-    func load() throws {
+    func load(_ entry: TPDModelEntry) throws {
         if display == nil { display = CIContext() }
-        guard engine == nil else { return }
+        guard engine?.entry.id != entry.id else { return }
+        engine = nil  // released BEFORE the replacement: two model sets at once is the peak
         let configuration = MLModelConfiguration()
-        engine = try TPDInferenceEngine(configuration: configuration)
+        engine = try makeEngine(entry, configuration: configuration)
         computeUnits = configuration.computeUnits
         // Cheap standing proof: if the load ever migrates back into `init` this
         // prints YES, which is otherwise visible only in a profile.
@@ -68,9 +66,6 @@ actor InferenceWorker {
     /// consecutive passes to see the idle between them, not only their lengths.
     func process(_ frame: VideoFrame) throws -> (frame: RenderedFrame,
                                                  cost: PerformanceMeter.Sample)? {
-        // Cheap after the first call, and it keeps the engine's existence an
-        // invariant of this method rather than of the caller's call order.
-        try load()
         guard let engine, let display else { return nil }
         let image = CIImage(cvPixelBuffer: frame.pixelBuffer)
         let started = ContinuousClock.now
@@ -114,6 +109,14 @@ final class LiveViewModel {
     private(set) var performance = PerformanceMeter.Snapshot()
     private(set) var computeUnits: MLComputeUnits?
 
+    private(set) var models: [TPDModelEntry] = []
+    /// What the user chose, which is not yet what runs: `active` is the entry the worker really
+    /// built, nil across the gap, so the HUD cannot name a model still loading. A broken registry
+    /// is held rather than thrown: there is no view to show it to until `run()`.
+    private(set) var selected: TPDModelEntry?
+    private(set) var active: TPDModelEntry?
+    private let registryFailure: Error?
+
     /// `@ObservationIgnored` because `drop()` fires at capture rate, up to 60 Hz,
     /// and no view reads it — they read `performance`. Registering a mutation that
     /// often is main-actor time a diagnostic must not take from what it watches.
@@ -136,6 +139,23 @@ final class LiveViewModel {
 
     init(source: any FrameSource = FrameSourceFactory.makeDefault()) {
         self.source = source
+        do {
+            let registry = try ModelRegistry.load()
+            (models, selected, registryFailure) = (registry.models, registry.first, nil)
+        } catch { registryFailure = error }
+    }
+
+    /// Switches models without leaving the live view. Bumping `attempt` does the work:
+    /// `.task(id:)` cancels the running loop — ending the stream, and with it `run()` and its
+    /// `defer` — then enters a fresh one, which loads the new entry on the worker's executor.
+    func select(_ entry: TPDModelEntry) {
+        guard entry.id != selected?.id else { return }
+        selected = entry
+        // The old model's overlay and timings are lies about the new one, so neither survives.
+        (frame, active, failure) = (nil, nil, nil)
+        meter = PerformanceMeter()
+        performance = meter.snapshot
+        attempt += 1
     }
 
     /// Runs until the enclosing `.task` is cancelled, which ends the stream and
@@ -143,15 +163,23 @@ final class LiveViewModel {
     func run() async {
         generation += 1
         let mine = generation
+        // A pass from the previous generation no longer clears this.
+        isInferring = false
         defer { if generation == mine { source.stop() } }
+        guard let entry = selected else {
+            failure = Self.failure(for: registryFailure
+                ?? TPDInferenceError.resourceMissing(ModelRegistry.resource + ".json"))
+            return
+        }
         do {
             // `await`, not a constructor: this suspends main while the models
-            // load on the worker's executor. See `InferenceWorker.load()`.
-            try await worker.load()
+            // load on the worker's executor. See `InferenceWorker.load(_:)`.
+            try await worker.load(entry)
         } catch {
             failure = Self.failure(for: error)
             return
         }
+        active = await worker.loaded
         computeUnits = await worker.computeUnits
         let stream: FrameStream
         do {
@@ -171,9 +199,9 @@ final class LiveViewModel {
             Task { [weak self, worker] in
                 do {
                     let done = try await worker.process(video)
-                    self?.finish(done, nil)
+                    self?.finish(done, nil, mine)
                 } catch {
-                    self?.finish(nil, error)
+                    self?.finish(nil, error, mine)
                 }
             }
         }
@@ -187,8 +215,10 @@ final class LiveViewModel {
         attempt += 1
     }
 
+    /// A switch bumps `generation`, so a result from the model the user just left is dropped.
     private func finish(_ done: (frame: RenderedFrame, cost: PerformanceMeter.Sample)?,
-                        _ error: Error?) {
+                        _ error: Error?, _ generation: Int) {
+        guard generation == self.generation else { return }
         if let done {
             frame = done.frame
             meter.record(done.cost)

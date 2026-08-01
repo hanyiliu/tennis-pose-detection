@@ -33,6 +33,8 @@ struct LiveCameraView: View {
             if model.frame == nil { emptyState }
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
+                ModelPicker(models: model.models, selected: model.selected) { model.select($0) }
+                    .padding(.horizontal, 14).padding(.bottom, 10)
                 controls
             }
         }
@@ -42,7 +44,8 @@ struct LiveCameraView: View {
         // an accessibility size it would else cover and eat every tap aimed at. A
         // bare `.frame` hit-tests nothing, so the space it reserves stays preview.
         .overlay(alignment: .topLeading) {
-            DiagnosticsHUD(stats: model.performance, computeUnits: model.computeUnits)
+            DiagnosticsHUD(stats: model.performance, computeUnits: model.computeUnits,
+                           entry: model.active)
                 .padding(.horizontal, 14)
                 .padding(.top, 6)
                 .containerRelativeFrame(.vertical, alignment: .top) { height, _ in
@@ -67,15 +70,15 @@ struct LiveCameraView: View {
         }
     }
 
-    /// `controls` is 46 pt of chip plus 12 pt of padding either side, and the
-    /// chips are fixed-size, so this does not move with Dynamic Type either.
-    private static let controlsClearance: CGFloat = 96
+    /// `controls` plus the model strip and its notes, all fixed-size; the HUD panel scrolls.
+    private static let controlsClearance: CGFloat = 200
 
     private var controls: some View {
         HStack(alignment: .center, spacing: 10) {
             cameraRollButton
             Spacer(minLength: 0)
-            ToggleBar(options: $model.overlay)
+            ToggleBar(options: $model.overlay,
+                      geometry: model.selected?.producesGeometry ?? true)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
