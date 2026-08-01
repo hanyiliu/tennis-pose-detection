@@ -345,7 +345,7 @@ class ResNet:
         self.logit, self.prob, self.convention, self.predicted = 0.0, 0.0, Convention(), {}
         # The affine this graph really bakes in vs the one the REGISTRY's (mean, std) implies, so
         # perturbing `input.mean` fails here, not on device. Off the buffers, not the package: the
-        # package's own copy is a fused fp16 batch_norm whose beta quantizes ~1e-3, 10x NORM_TOL.
+        # package's copy is a fused fp16 batch_norm whose beta reads 7.16e-04 out, 7x NORM_TOL.
         baked = self.torch.scale.flatten().tolist() + self.torch.bias.flatten().tolist()
         self.norm = max(abs(a - b) for a, b in zip(registry_affine(entry), baked))
 
