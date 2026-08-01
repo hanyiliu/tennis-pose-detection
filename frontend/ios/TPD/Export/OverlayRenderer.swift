@@ -42,7 +42,7 @@ struct OverlayGeometry: Equatable {
          measure: (String, CGFloat) -> CGSize = OverlayRenderer.measure) {
         guard result.frameSize.width > 0, result.frameSize.height > 0 else { return }
         let fit = FrameFit(frame: result.frameSize, view: size)
-        let bounds = fit.map(result.bbox)
+        let bounds = result.bbox.map { fit.map($0) }
         if options.boundingBox { box = bounds }
         if options.keypoints {
             // The backend's `visibility <= 0` skip: a channel that never fired must not be drawn.
@@ -55,6 +55,14 @@ struct OverlayGeometry: Equatable {
         let pillSize = CGSize(width: measured.width + style.pillPadding.width,
                               height: measured.height + style.pillPadding.height)
         let margin = style.margin
+        // No box to hang the caption off, and the top-left fallback is under the diagnostics
+        // pill. Centred: this reading is all such a model produces.
+        guard let bounds else {
+            pill = Pill(rect: CGRect(origin: CGPoint(x: (size.width - pillSize.width) / 2,
+                                                     y: (size.height - pillSize.height) / 2),
+                                     size: pillSize), text: caption, fontSize: style.fontSize)
+            return
+        }
         let x = min(max(margin, bounds.minX), max(margin, size.width - pillSize.width - margin))
         var y = bounds.minY - pillSize.height - margin
         // Flips below a box against the top of the frame, so the reading stays in shot.

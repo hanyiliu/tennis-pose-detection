@@ -16,11 +16,18 @@ struct OverlayOptions: Equatable, Sendable {
 /// Camera-app-style control strip: compact, dark, thumb-reachable.
 struct ToggleBar: View {
     @Binding var options: OverlayOptions
+    /// False when the model predicts no geometry: a classifier has no box and no keypoints, so
+    /// those go dim and inert — a switch that changes nothing reads as a bug — and the picker
+    /// says why. True by default: the still and video previews are the pipeline.
+    var geometry = true
 
     var body: some View {
         HStack(spacing: 8) {
-            chip("Box", "rectangle.dashed", $options.boundingBox)
-            chip("Points", "figure.tennis", $options.keypoints)
+            Group {
+                chip("Box", "rectangle.dashed", $options.boundingBox)
+                chip("Points", "figure.tennis", $options.keypoints)
+            }
+            .disabled(!geometry).opacity(geometry ? 1 : 0.3)
             chip("Class", "tag.fill", $options.label)
             chip("Conf", "percent", $options.confidence)
         }

@@ -16,6 +16,8 @@ struct DiagnosticsHUD: View {
     /// From the configuration the engine was really built with: a *request*, since
     /// Core ML has no read-back of where it dispatched. `nil` until the models load.
     let computeUnits: MLComputeUnits?
+    /// The entry the engine **in hand** was built from, not the one the picker shows.
+    var entry: TPDModelEntry?
 
     /// Survives relaunch — which is why the pill sits above the panel, outside its
     /// scroll view: at any text size, the off switch is the first thing drawn.
@@ -77,7 +79,7 @@ struct DiagnosticsHUD: View {
             // The literal division above it, checkable by hand. Periods, not passes:
             // N samples span N-1 gaps. Window rows; the counters below are session.
             row("periods ÷ elapsed", Self.window(stats))
-            row("stages 1–3", stats.latest.map { Self.seconds($0.model) } ?? "—")
+            row("model pass", stats.latest.map { Self.seconds($0.model) } ?? "—")
             row("display raster", stats.latest.map { Self.seconds($0.raster) } ?? "—")
             row("cost per frame", stats.latest.map { Self.seconds($0.cost) } ?? "—")
             row("cost range", Self.range(stats.cheapest, stats.dearest))
@@ -90,13 +92,16 @@ struct DiagnosticsHUD: View {
             #if targetEnvironment(simulator)
             row("hardware", "Simulator — no Neural Engine")
             #endif
-            if let model = ModelIdentity.bundled {
-                row("stage 1 model", "\(model.bboxModel) @ \(model.bboxInputSize)²")
-                row("stage 2+3 model", "\(model.poseModel) @ \(model.keypointInputSize)², "
-                    + "\(model.numKeypoints) kp, \(model.numClasses) cls")
-                row("weights", model.provenance)
-            } else {
-                row("model", "TPDModelSpec.json unreadable")
+            row("active model", entry.map { "\($0.id) · \($0.kind.rawValue)" } ?? "loading…")
+            if let entry {
+                // Per stage: a pipeline's input is not one number — stages 2+3 run at 128².
+                row(entry.producesGeometry ? "stage 1 input" : "input", "\(entry.input.size)² RGB"
+                    + (entry.input.normalizationBakedIn ? " 0–255, normalization in graph" : ""))
+                row("output", "\(entry.output.name) as \(entry.output.type.rawValue)"
+                    + (entry.output.type == .logits ? ", softmaxed here" : ", passed through"))
+                row("class order", "\(entry.labelOrder.status.rawValue) — "
+                    + entry.labels.joined(separator: ", "))
+                row("weights", entry.provenance)
             }
         }
         .font(.caption2)
@@ -153,30 +158,3 @@ struct DiagnosticsHUD: View {
     }
 }
 
-/// The build metadata half of `TPDModelSpec.json`, decoded apart from the spec on
-/// purpose: the spec is the runtime contract and fails the whole engine when a
-/// field is missing, whereas a malformed file here costs one row in a panel.
-struct ModelIdentity: Decodable, Sendable, Equatable {
-    let bboxModel: String, poseModel: String
-    let bboxInputSize: Int, keypointInputSize: Int
-    let numKeypoints: Int, numClasses: Int
-    let precision: String?
-    let sourceCheckpoint: String?
-    let sourceCheckpointSha256: String?
-
-    /// Checkpoint plus a digest — enough to tell two exports apart in a shot.
-    var provenance: String {
-        let name = (sourceCheckpoint as NSString?)?.lastPathComponent ?? "unknown checkpoint"
-        let digest = sourceCheckpointSha256.map { " · \($0.prefix(8))" } ?? ""
-        return name + digest + (precision.map { " · \($0)" } ?? "")
-    }
-
-    /// Read once, lazily, off the inference path; the panel is the only reader.
-    static let bundled: ModelIdentity? = load(from: .main)
-
-    static func load(from bundle: Bundle) -> ModelIdentity? {
-        guard let url = bundle.url(forResource: "TPDModelSpec", withExtension: "json"),
-              let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(ModelIdentity.self, from: data)
-    }
-}

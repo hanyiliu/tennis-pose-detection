@@ -90,9 +90,10 @@ actor StillInferenceWorker {
         // before the overlay looks wrong. The bbox beside it is directly
         // comparable to `norm_bbox_to_xyxy_pixels` on the same file.
         #if DEBUG
+        let box = result.bbox ?? .zero  // always a pipeline here, so always present
         NSLog("TPD still: frame %.0fx%.0f bbox xyxy %.0f %.0f %.0f %.0f",
-              result.frameSize.width, result.frameSize.height, result.bbox.minX,
-              result.bbox.minY, result.bbox.maxX, result.bbox.maxY)
+              result.frameSize.width, result.frameSize.height, box.minX,
+              box.minY, box.maxX, box.maxY)
         #endif
         return RenderedFrame(image: raster, result: result)
     }
@@ -131,7 +132,8 @@ actor StillInferenceWorker {
     }
 
     private func makeEngine() throws -> SerializedInferenceEngine {
-        let engine = SerializedInferenceEngine(try TPDInferenceEngine())
+        let engine = SerializedInferenceEngine(
+            try TPDInferenceEngine(entry: try ModelRegistry.load().first(of: .pipeline)))
         modelLoadCount += 1
         // Cheap standing proof, the same one the live view keeps: if this load
         // ever migrates back into an initializer this prints YES.

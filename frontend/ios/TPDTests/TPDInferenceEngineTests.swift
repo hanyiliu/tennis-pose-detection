@@ -44,10 +44,23 @@ final class TPDInferenceEngineTests: XCTestCase {
     }
 
     func testCompiledModelsAreInTheHostBundle() throws {
-        let spec = try TPDModelSpec.load(from: bundle)
-        for resource in [spec.bboxModelResource, spec.poseModelResource] {
+        for resource in try ModelRegistry.load(from: bundle).models.flatMap(\.resources) {
             XCTAssertNotNil(bundle.url(forResource: resource, withExtension: "mlmodelc"),
                             "\(resource).mlmodelc missing — run `make export` then `make generate`")
+        }
+    }
+
+    /// `input.name`, `output.name` and `input.size` are only claims until a frame goes through
+    /// the compiled package. Summing to 1 also pins the softmax `output.type: logits` asks for.
+    func testEachClassifierRunsAFrameThroughItsOwnPackage() throws {
+        let pixels = try frame(320, 240) { x, y in x > y ? 220 : 40 }
+        for entry in try ModelRegistry.load(from: bundle).models where entry.kind == .classifier {
+            let got = try ClassifierEngine(entry: entry, bundle: bundle).predict(pixelBuffer: pixels)
+            let saw = "\(entry.id) said \(got.label) from \(got.probabilities)"
+            XCTAssertEqual(got.probabilities.count, 4, saw)
+            XCTAssertEqual(got.probabilities.reduce(0, +), 1, accuracy: 1e-4, saw)  // NaN fails too
+            XCTAssertTrue(got.probabilities.allSatisfy(\.isFinite), saw)
+            XCTAssertTrue(entry.labels.contains(got.label), saw + " — not one of \(entry.labels)")
         }
     }
 
@@ -56,16 +69,17 @@ final class TPDInferenceEngineTests: XCTestCase {
     /// Runs both stages on a synthetic 640x480 frame with a bright figure-shaped bar on grey,
     /// and asserts every invariant the result contract promises.
     func testPredictProducesAWellFormedResult() throws {
-        let engine = try TPDInferenceEngine()
+        let engine = try pipelineEngine()
         let result = try engine.predict(pixelBuffer: try frame(640, 480) { x, y in
             (200...320).contains(x) && (80...400).contains(y) ? 235 : 60
         })
+        let box = try XCTUnwrap(result.bbox, "a pipeline always localizes")
 
         XCTAssertEqual(result.frameSize, CGSize(width: 640, height: 480))
         XCTAssertEqual(result.probabilities.count, engine.spec.numClasses)
         XCTAssertEqual(result.keypoints.count, engine.spec.numKeypoints)
         XCTAssertEqual(result.labels, engine.labels)
-        print("TPD probs \(result.probabilities) -> \(result.label) bbox \(result.bbox)")
+        print("TPD probs \(result.probabilities) -> \(result.label) bbox \(box)")
 
         // Exactly ONE softmax. Summing to 1 is necessary but not sufficient — a second
         // softmax also sums to 1 — so the max is also bounded. Feeding a probability vector
@@ -85,17 +99,17 @@ final class TPDInferenceEngineTests: XCTestCase {
 
         // The crop is a real in-frame rect, and every keypoint is inside it — which also
         // makes each coordinate lie in 0...1 once normalized by the frame size.
-        XCTAssertTrue(result.bbox.minX >= 0 && result.bbox.minY >= 0, "\(result.bbox)")
-        XCTAssertTrue(result.bbox.maxX <= 640 && result.bbox.maxY <= 480, "\(result.bbox)")
-        XCTAssertTrue(result.bbox.width >= 1 && result.bbox.height >= 1, "\(result.bbox)")
+        XCTAssertTrue(box.minX >= 0 && box.minY >= 0, "\(box)")
+        XCTAssertTrue(box.maxX <= 640 && box.maxY <= 480, "\(box)")
+        XCTAssertTrue(box.width >= 1 && box.height >= 1, "\(box)")
         for (index, keypoint) in result.keypoints.enumerated() {
             let point = keypoint.position
             XCTAssertTrue(point.x.isFinite && point.y.isFinite, "keypoint \(index) not finite")
             XCTAssertTrue(keypoint.visibility.isFinite, "visibility \(index) not finite")
-            XCTAssertTrue((result.bbox.minX...result.bbox.maxX).contains(point.x),
-                          "keypoint \(index) x \(point.x) outside \(result.bbox)")
-            XCTAssertTrue((result.bbox.minY...result.bbox.maxY).contains(point.y),
-                          "keypoint \(index) y \(point.y) outside \(result.bbox)")
+            XCTAssertTrue((box.minX...box.maxX).contains(point.x),
+                          "keypoint \(index) x \(point.x) outside \(box)")
+            XCTAssertTrue((box.minY...box.maxY).contains(point.y),
+                          "keypoint \(index) y \(point.y) outside \(box)")
             XCTAssertTrue((0...1).contains(point.x / 640) && (0...1).contains(point.y / 480))
         }
         // The overlay must skip non-positive visibility, the way the backend does.
@@ -106,16 +120,17 @@ final class TPDInferenceEngineTests: XCTestCase {
     /// An all-black frame is the input that used to overflow fp16 in stage 3. Nothing in the
     /// result may be NaN or infinite.
     func testBlackFrameProducesNoNaNOrInfinity() throws {
-        let engine = try TPDInferenceEngine()
+        let engine = try pipelineEngine()
         let result = try engine.predict(pixelBuffer: try frame(320, 240) { _, _ in 0 })
+        let box = try XCTUnwrap(result.bbox)
 
         for (index, probability) in result.probabilities.enumerated() {
             XCTAssertTrue(probability.isFinite, "probability \(index) is \(probability)")
         }
         XCTAssertEqual(result.probabilities.reduce(0, +), 1, accuracy: 1e-3,
                        "black frame probabilities \(result.probabilities)")
-        for value in [result.bbox.minX, result.bbox.minY, result.bbox.width, result.bbox.height] {
-            XCTAssertTrue(value.isFinite, "bbox \(result.bbox) is not finite")
+        for value in [box.minX, box.minY, box.width, box.height] {
+            XCTAssertTrue(value.isFinite, "bbox \(box) is not finite")
         }
         for (index, keypoint) in result.keypoints.enumerated() {
             XCTAssertTrue(keypoint.position.x.isFinite && keypoint.position.y.isFinite,
@@ -124,6 +139,10 @@ final class TPDInferenceEngineTests: XCTestCase {
                           "black-frame visibility \(index) is \(keypoint.visibility)")
         }
         XCTAssertTrue(engine.labels.contains(result.label))
+    }
+
+    private func pipelineEngine() throws -> TPDInferenceEngine {
+        try TPDInferenceEngine(entry: try ModelRegistry.load(from: bundle).first(of: .pipeline))
     }
 
     /// Greyscale BGRA at an arbitrary size; `luma` is indexed in top-left-origin pixels.
